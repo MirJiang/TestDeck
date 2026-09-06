@@ -106,12 +106,14 @@ async def analyze_run(run_id: str, db: Session = Depends(get_db), user: User = D
     if not run:
         raise HTTPException(404, "执行记录不存在")
     from ..perms import accessible_project_ids
-    from ..models import TestCase, TestPlan
+    from ..models import TestCase, TestPlan, Flow
     if user.role != "admin":
         ids = set(accessible_project_ids(user, db))
         pid = None
         if run.plan_id and db.get(TestPlan, run.plan_id):
             pid = db.get(TestPlan, run.plan_id).project_id
+        elif run.flow_id and db.get(Flow, run.flow_id):
+            pid = db.get(Flow, run.flow_id).project_id
         elif run.case_id and db.get(TestCase, run.case_id):
             pid = db.get(TestCase, run.case_id).project_id
         if pid not in ids:
@@ -119,16 +121,19 @@ async def analyze_run(run_id: str, db: Session = Depends(get_db), user: User = D
     if run.status != "failed":
         return {"cause": "本次执行全部通过，无需分析", "suggestion": "", "engine": "builtin"}
 
+    # 收集失败步骤：计划明细的条目带 case_id/flow_id（步骤在其 detail 里），
+    # 单用例/单流程的 detail 本身就是步骤数组
     failed = []
-    for item in run.detail or []:
-        steps = item.get("detail") if "case_id" in item else run.detail
-        for s in (steps or []):
-            if not s.get("pass"):
-                failed.append(s)
-        if "case_id" in item and all(s.get("pass") for s in item.get("detail", [])):
-            pass
-    if not failed and run.case_id:
-        failed = [s for s in run.detail if not s.get("pass")]
+    detail = run.detail or []
+    is_plan_detail = bool(detail) and isinstance(detail[0], dict) and (
+        "case_id" in detail[0] or "flow_id" in detail[0])
+    if is_plan_detail:
+        for item in detail:
+            for s in item.get("detail") or []:
+                if not s.get("pass"):
+                    failed.append(s)
+    else:
+        failed = [s for s in detail if not s.get("pass")]
 
     out = await A.chat_json(
         "你是测试失败分析助手。根据失败的 HTTP 测试步骤给出原因和建议。"
@@ -147,9 +152,9 @@ def get_usage(user: User = Depends(current_user)):
 
 @router.get("/regression-advice")
 def regression_advice(db: Session = Depends(get_db), user: User = Depends(current_user)):
-    """回归建议：超过 14 天未执行的用例 + 近 7 天有提交但未跑过的项目。"""
+    """回归建议：超过 14 天未执行的用例与流程 + 近 7 天有提交但未跑过的项目。"""
     from datetime import datetime, timedelta
-    from ..models import TestRun
+    from ..models import TestRun, Flow
     threshold = datetime.utcnow() - timedelta(days=14)
     stale = []
     for c in db.query(TestCase).all():
@@ -158,6 +163,13 @@ def regression_advice(db: Session = Depends(get_db), user: User = Depends(curren
         if last is None or last.created_at < threshold:
             stale.append({"case_id": c.id, "case_name": c.name,
                           "last_run": last.created_at.isoformat() if last else "从未执行"})
+    stale_flows = []
+    for f in db.query(Flow).all():
+        last = (db.query(TestRun).filter(TestRun.flow_id == f.id)
+                .order_by(TestRun.created_at.desc()).first())
+        if last is None or last.created_at < threshold:
+            stale_flows.append({"flow_id": f.id, "flow_name": f.name,
+                                "last_run": last.created_at.isoformat() if last else "从未执行"})
     week_ago = datetime.utcnow() - timedelta(days=7)
     hot = []
     from ..models import CommitSync, Project
@@ -166,7 +178,7 @@ def regression_advice(db: Session = Depends(get_db), user: User = Depends(curren
         proj = db.get(Project, cm.repo_id)  # repo→project 映射在列表页拼
         hot.append({"message": cm.message, "author": cm.author, "sha": cm.sha[:8],
                     "created_at": cm.created_at.isoformat()})
-    return {"stale_cases": stale[:10], "recent_commits": hot[:10],
-            "advice": (f"有 {len(stale)} 条用例超过 14 天未执行，建议安排一次回归。"
-                       if stale else "用例执行情况良好。") +
+    return {"stale_cases": stale[:10], "stale_flows": stale_flows[:10], "recent_commits": hot[:10],
+            "advice": (f"有 {len(stale)} 条用例、{len(stale_flows)} 条流程超过 14 天未执行，建议安排一次回归。"
+                       if stale or stale_flows else "用例执行情况良好。") +
                       (f" 近 7 天有 {len(hot)} 条新提交。" if hot else "")}

@@ -12,7 +12,7 @@ from ..perms import check_project_access
 from ..engine.runner import run_case
 from ..engine.ui_runner import run_ui_case
 from ..engine.ai_runner import run_ai_case
-from ..engine.queue import queued, register, cancel, unregister
+from ..engine.queue import queued, register, cancel, unregister, is_cancelled
 from ..notify import notify_run
 
 router = APIRouter(prefix="/api/v1/runs", tags=["runs"])
@@ -54,6 +54,8 @@ def execute_plan(plan: TestPlan, env: Env, trigger_by: str = "cron") -> TestRun:
         t0 = time.time()
         results = []
         for cid in plan.case_ids or []:
+            if is_cancelled(run.id):   # 计划级取消：当前条目完成后不再继续
+                break
             c = db.get(TestCase, cid)
             if not c:
                 continue
@@ -70,17 +72,21 @@ def execute_plan(plan: TestPlan, env: Env, trigger_by: str = "cron") -> TestRun:
             run.detail = list(results)
             db.commit()   # 每完成一条用例就落库，计划执行也能流式看到进度
         for fid in plan.flow_ids or []:
+            if is_cancelled(run.id):
+                break
             f = db.get(Flow, fid)
             if not f:
                 continue
-            sub_id = _new_run_id()
-            r = run_flow(f, env, sub_id)
-            db.add(TestRun(id=sub_id, flow_id=f.id, flow_name=f.name,
-                           env_id=env.id, env_name=env.name, trigger_by=trigger_by,
-                           status=r["status"], pass_n=r["pass_n"], fail_n=r["fail_n"],
-                           duration=r["duration"], detail=r["detail"]))
+            sub = TestRun(id=_new_run_id(), flow_id=f.id, flow_name=f.name,
+                          env_id=env.id, env_name=env.name, trigger_by=trigger_by)
+            db.add(sub); db.commit()
+            cases = {c.id: c for c in db.query(TestCase).filter(TestCase.project_id == f.project_id)}
+            r = run_flow(f, env, sub.id,
+                         on_step=lambda d, _sid=sub.id: _push_run_detail(_sid, d), cases=cases)
+            sub.status, sub.pass_n, sub.fail_n = r["status"], r["pass_n"], r["fail_n"]
+            sub.duration, sub.detail = r["duration"], r["detail"]
             total_p += r["pass_n"]; total_f += r["fail_n"]
-            results.append({"flow_id": f.id, "run_id": sub_id, "name": f.name,
+            results.append({"flow_id": f.id, "run_id": sub.id, "name": f.name,
                             "pass": r["fail_n"] == 0, "pass_n": r["pass_n"], "fail_n": r["fail_n"],
                             "detail": r["detail"]})
             run.detail = list(results)
@@ -178,13 +184,15 @@ def export_runs_csv(db: Session = Depends(get_db), user: User = Depends(current_
 
 
 @router.get("")
-def list_runs(plan: str = "", case: str = "", page: int = 1, size: int = 20,
+def list_runs(plan: str = "", case: str = "", flow: str = "", page: int = 1, size: int = 20,
               db: Session = Depends(get_db), user: User = Depends(current_user)):
     q = db.query(TestRun).order_by(TestRun.created_at.desc(), TestRun.id.desc())
     if plan:
         q = q.filter(TestRun.plan_id == plan)
     if case:
         q = q.filter(TestRun.case_id == case)
+    if flow:
+        q = q.filter(TestRun.flow_id == flow)
     if user.role != "admin":  # member 只见自己项目的执行记录
         from ..perms import accessible_project_ids
         ids = set(accessible_project_ids(user, db))

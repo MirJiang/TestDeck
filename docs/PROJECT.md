@@ -14,9 +14,9 @@
 | 认证与用户 | JWT 登录，admin / member 双角色；独立用户管理（建号、重置密码、自助改密） |
 | 项目 / 环境 | 多项目管理，项目级权限隔离（成员只见自己创建或被加入的项目）；环境 = Base URL + 变量，一个项目多个环境，入口在项目页内 |
 | AI 用例（统一形态） | 目标下分两类：**API 测试**——模型根据目标自主设计请求（方法/路径/头/体）并发送、检查响应、记住 token；**UI 测试**——模型看页面状态（+截图，可选）实时决策点哪/填什么；支持拖拽（滑块验证码）与坐标点击（点选验证码）。可录制/固化为**固定步骤**回放，回归零 token。历史手动 API/UI 用例仍可执行与删除 |
-| 流程测试 | 按业务线串联多角色：每角色独立登录态（API 各自 cookie、UI 各自浏览器会话）；API/UI/AI 步骤混排；共享变量传递业务单据；泳道图展示 |
+| 流程测试 | 按业务线串联多角色：每角色独立登录态（API 各自 cookie、UI 各自浏览器会话）；API/UI/AI 步骤混排；**引用已有用例作为一步**（在角色会话内联执行，save 结果直通共享区）；共享变量传递业务单据；截图基线对比（视觉回归）；泳道图展示；执行流式进度、可取消 |
 | 测试计划 | **用例 + 流程**的批量执行容器（条目互相独立，失败不中断批次）+ 默认环境；手动 / cron 定时 / Git 默认分支 push 三种触发；执行记录统一进「执行记录」 |
-| AI 辅助 | 从 Git 提交生成用例草稿、自然语言生成用例、失败原因分析、用量统计 |
+| AI 辅助 | 从 Git 提交生成用例草稿、自然语言生成用例、失败原因分析（用例/计划/流程）、用量统计、回归建议（用例与流程） |
 | Git 集成 | 绑定仓库生成 webhook（兼容 GitHub/GitLab push），提交同步并可自动触发回归；内网可用 git-sync CLI |
 | 通知 | 执行失败自动推送钉钉/企微群机器人，支持测试发送 |
 | 模型配置 | 界面化管理多家厂商模型（国内外 19 家预置 + 自定义），区分按量 API / Token 套餐接入，在线拉取模型列表，连接测试，保存即生效 |
@@ -83,6 +83,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 - 环境变量（项目页「环境」管理，如 `username`/`password`）注入所有步骤与 AI 目标，`${name}` 引用。
 - API 步骤「记住返回值」（如 `data.token` → `${token}`）在同用例后续步骤可用。
 - 流程测试中 AI 步骤的 `save` 与 API 步骤的 `save` 共享同一命名空间，实现"AI 创建单据 → 后续角色引用单号"。
+- 流程「引用用例」步骤在所选角色的会话里内联执行：用例内部的 `${变量}` 能读到角色变量与全流程共享变量，其 save 的结果自动进入共享区——接线无需配置，天然生效。
 
 ### 4.2 UI 可视化录制
 - **remote 模式**（默认）：后端起无头浏览器，页面以 JPEG 帧（400ms）串流到网页；用户在画面上点击/输入/跳转，指令经队列回传执行并记录为步骤。支持远程与容器部署，画面区误点不记录、连点去重、连续输入合并。
@@ -103,11 +104,15 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 - 可选 Lightpanda（AI 原生轻量引擎，beta，内存约为 Chromium 的 1/9）：经 CDP 连接，支持自动拉起进程（`TD_LIGHTPANDA_BIN`）；不可用时自动回退 Chromium，回退信息写入执行明细。
 - 低配部署：`docker-compose.lowmem.yml` 后端镜像不装 Chromium，统一走 Lightpanda 容器。
 
-### 4.5 调度与触发
+### 4.5 高级断言与视觉回归
+- **JSONPath 断言**：检查点类型选「JSONPath 断言（高级）」，字段写表达式（如 `$.data.list[*].id`）；期望值留空 = 匹配到任意值即通过，填值 = 任一匹配值等于它（弱类型）即通过。四类基础检查点（status/contains/field_eq/not_empty）之外的兜底能力。
+- **截图基线对比**：流程的「截图留档」步骤，首次通过自动留存基线（`static/base-{flow}-{步骤}.png`），之后每次执行与基线做像素比对，差异超过阈值（`TD_SHOT_DIFF_PCT`，默认 2%）判失败并生成「基线｜本次」并排对比图；`TD_SHOT_DIFF=0` 关闭。调整流程步骤顺序后基线对应关系会变化，重新跑一次成功执行即可刷新基线。
+
+### 4.6 调度与触发
 - 计划保存即同步 Schedule 表并重建 APScheduler 任务（`分 时 日 月 周`）。
 - Git webhook（随机 secret 鉴权）收到默认分支 push → 落库提交 + 触发 trigger=git 的计划；内网用 `python -m app.cli.git_sync --repo <路径> --webhook <地址>`。
 
-### 4.6 权限模型
+### 4.7 权限模型
 - admin 全可见；member 仅见自己创建或被加入的项目（`perms.check_project_access`）。
 - 模型配置、用户管理、通知渠道写操作仅 admin。
 
@@ -151,6 +156,8 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 | `TD_SEED_DEMO` | `1` | 是否预置询价单演示数据 |
 | `TD_NO_SCHEDULER` | 未设 | 设为 1 禁用调度（测试用） |
 | `TD_KEEP_DAYS` | `30` | 截图保留天数 |
+| `TD_SHOT_DIFF` | `1` | 设为 0 关闭流程截图基线对比 |
+| `TD_SHOT_DIFF_PCT` | `2` | 截图与基线的差异阈值（百分比，超过判失败） |
 | `TD_BROWSER_ENGINE` | `chromium` | `lightpanda` 启用轻量引擎 |
 | `TD_LIGHTPANDA_URL` | `http://127.0.0.1:9222` | Lightpanda CDP 地址 |
 | `TD_LIGHTPANDA_BIN` | 未设 | lightpanda 可执行文件路径，设置后平台自动拉起 |
@@ -172,7 +179,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 ## 9. 测试
 
 ```bash
-cd backend && .venv/Scripts/python -m pytest tests -q     # 66 个单元/接口测试
+cd backend && .venv/Scripts/python -m pytest tests -q     # 72 个单元/接口测试
 # E2E（需先起后端与 mock 被测系统 9001）：
 tests/e2e.py e2e_m2.py e2e_m3.py e2e_m5.py e2e_flow.py
 # 假 LLM 服务器（AI 引擎联调用）：uvicorn tests.fake_llm:app --port 9111

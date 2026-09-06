@@ -13,3 +13,5 @@ psycopg2-binary>=2.9
 PyMySQL>=1.1
 cryptography>=42.0
 pyyaml>=6.0
+jsonpath-ng>=1.6        # 高级断言：JSONPath 表达式（$.data.items[0].id）
+pillow>=10.0            # 流程截图与基线对比（视觉回归）

@@ -8,7 +8,7 @@ from ..perms import check_project_access, accessible_project_ids
 
 router = APIRouter(prefix="/api/v1", tags=["cases"])
 
-VALID_CHECKS = {"status", "contains", "field_eq", "not_empty"}
+VALID_CHECKS = {"status", "contains", "field_eq", "not_empty", "jsonpath"}
 
 
 class StepIn(BaseModel):

@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..db import get_db
-from ..models import User, Project, Flow, TestRun, Env
+from ..models import User, Project, Flow, TestRun, Env, TestCase
 from ..auth import current_user
 from ..perms import check_project_access, accessible_project_ids
-from ..engine.queue import queued
+from ..engine.queue import queued, register, unregister
 from ..engine.flow_runner import run_flow
 from ..notify import notify_run
 
@@ -83,6 +83,7 @@ class RunIn(BaseModel):
 @router.post("/{fid}/run")
 async def run_flow_api(fid: str, body: RunIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
     import time as _t
+    from .runs import _push_run_detail
     f = db.get(Flow, fid)
     if not f:
         raise HTTPException(404, "流程不存在")
@@ -93,7 +94,17 @@ async def run_flow_api(fid: str, body: RunIn, db: Session = Depends(get_db), use
     run = TestRun(id=f"R-{int(_t.time() * 1000) % 10**9:09d}", flow_id=f.id, flow_name=f.name,
                   env_id=env.id, env_name=env.name, trigger_by=f"user:{user.username}")
     db.add(run); db.commit()
-    r = await queued(lambda: run_flow(f, env, run.id))
+    cases = {c.id: c for c in db.query(TestCase).filter(TestCase.project_id == f.project_id)}
+    register(run.id)   # 支持执行中取消
+
+    def _exec():
+        return run_flow(f, env, run.id,
+                        on_step=lambda d: _push_run_detail(run.id, d), cases=cases)
+
+    try:
+        r = await queued(_exec)
+    finally:
+        unregister(run.id)
     run.status, run.pass_n, run.fail_n = r["status"], r["pass_n"], r["fail_n"]
     run.duration, run.detail = r["duration"], r["detail"]
     db.commit()

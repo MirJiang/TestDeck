@@ -27,11 +27,15 @@ function pct(r) { const t = r.pass_n + r.fail_n; return t ? Math.round(r.pass_n 
 <template>
   <div class="hd"><div><h2>工作台</h2></div></div>
 
-  <div v-if="advice && (advice.stale_cases.length || advice.recent_commits.length)" class="panel" style="border-color:var(--acc-weak);background:#fbfcfe">
+  <div v-if="advice && (advice.stale_cases.length || advice.stale_flows?.length || advice.recent_commits.length)" class="panel" style="border-color:var(--acc-weak);background:#fbfcfe">
     <div class="bar"><h3>回归建议</h3><span class="muted" style="font-size:12.5px">{{ advice.advice }}</span></div>
     <div v-if="advice.stale_cases.length" style="margin-bottom:8px">
       <div class="muted" style="font-size:12px;margin-bottom:4px">超过 14 天未执行的用例</div>
       <a v-for="s in advice.stale_cases.slice(0, 5)" :key="s.case_id" class="chip" @click="$router.push('/cases')">{{ s.case_name }}（{{ s.last_run.slice(0, 10) }}）</a>
+    </div>
+    <div v-if="advice.stale_flows?.length" style="margin-bottom:8px">
+      <div class="muted" style="font-size:12px;margin-bottom:4px">超过 14 天未执行的流程</div>
+      <a v-for="s in advice.stale_flows.slice(0, 5)" :key="s.flow_id" class="chip" @click="$router.push('/flows')">{{ s.flow_name }}（{{ s.last_run.slice(0, 10) }}）</a>
     </div>
     <div v-if="advice.recent_commits.length">
       <div class="muted" style="font-size:12px;margin-bottom:4px">近 7 天的新提交（可到用例页让 AI 生成测试）</div>

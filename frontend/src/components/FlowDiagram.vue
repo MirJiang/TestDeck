@@ -11,12 +11,15 @@ const emit = defineEmits(['select'])
 const zoom = ref(null)
 
 const detailOf = (i) => (props.detail || []).find(d => d.idx === i + 1)
+const typeLabel = (t) => ({ ai: 'AI', ui: '页面', case: '用例', api: '接口' }[t] || t)
 const actionText = (s) => s.type === 'api'
   ? `${s.m} ${s.url}`
   : s.type === 'ai'
     ? `AI：${(s.goal || '').slice(0, 46)}`
-    : ({ goto: '打开', click: '点击', fill: '输入', expect_text: '检查文字', screenshot: '截图' }[s.action] || s.action)
-      + ' ' + (s.url || s.selector || s.value || '')
+    : s.type === 'case'
+      ? `引用：${(s.case_name || '').slice(0, 46)}`
+      : ({ goto: '打开', click: '点击', fill: '输入', expect_text: '检查文字', screenshot: '截图' }[s.action] || s.action)
+        + ' ' + (s.url || s.selector || s.value || '')
 </script>
 
 <template>
@@ -32,7 +35,7 @@ const actionText = (s) => s.type === 'api'
                  @click="emit('select', i - 1)">
               <div class="sc-top">
                 <span class="sc-no">{{ i }}</span>
-                <span class="sc-type" :class="{ ai: steps[i-1].type === 'ai' }">{{ steps[i-1].type === 'ai' ? 'AI' : steps[i-1].type === 'ui' ? '页面' : '接口' }}</span>
+                <span class="sc-type" :class="{ ai: steps[i-1].type === 'ai', case: steps[i-1].type === 'case' }">{{ typeLabel(steps[i-1].type) }}</span>
                 <span v-if="detailOf(i-1)" class="sc-st">{{ detailOf(i-1).pass ? '✓' : '✗' }}</span>
                 <span v-if="steps[i-1].saved?.name || detailOf(i-1)?.saved" class="sc-share">共享</span>
               </div>
@@ -72,6 +75,7 @@ const actionText = (s) => s.type === 'api'
 .sc-no{width:18px;height:18px;border-radius:50%;background:var(--ink);color:#fff;font-size:11px;display:flex;align-items:center;justify-content:center}
 .sc-type{font-size:10.5px;color:var(--acc);background:var(--acc-weak);border-radius:3px;padding:0 5px}
 .sc-type.ai{color:#7c3aed;background:#f3eefe}
+.sc-type.case{color:var(--warn);background:var(--warn-bg)}
 .sc-st{margin-left:auto;font-weight:700}
 .stepcard.done .sc-st{color:var(--ok)}
 .stepcard.fail .sc-st{color:var(--err)}

@@ -41,7 +41,7 @@ def weak_eq(a, b) -> bool:
 
 
 def evaluate_check(check: dict, status: int, body_text: str, body_json) -> dict:
-    """返回 {pass, reason}。check.type: status|contains|field_eq|not_empty"""
+    """返回 {pass, reason}。check.type: status|contains|field_eq|not_empty|jsonpath"""
     ctype = (check or {}).get("type", "status")
     expect = (check or {}).get("expect", "")
     field = (check or {}).get("field", "")
@@ -61,7 +61,29 @@ def evaluate_check(check: dict, status: int, body_text: str, body_json) -> dict:
         actual = get_field(body_json, field) if field else body_json
         ok = actual is not None and actual != "" and actual != [] and actual != {}
         return {"pass": ok, "reason": f"字段 {field} 应不为空" if not ok else f"{field or '返回'} 非空"}
+    if ctype == "jsonpath":
+        # 高级断言：field 写 JSONPath 表达式（如 $.data.items[*].sku）
+        # expect 留空 → 匹配到任意值即通过；expect 有值 → 任一匹配值等于它（弱类型）即通过
+        return _check_jsonpath(field, expect, body_json)
     return {"pass": True, "reason": "无检查点"}
+
+
+def _check_jsonpath(expr: str, expect: str, body_json) -> dict:
+    if not expr:
+        return {"pass": False, "reason": "JSONPath 表达式为空"}
+    try:
+        from jsonpath_ng import parse
+        matches = [m.value for m in parse(expr).find(body_json)]
+    except Exception as e:
+        return {"pass": False, "reason": f"JSONPath 解析失败：{e}"[:160]}
+    if not matches:
+        return {"pass": False, "reason": f"{expr} 未匹配到任何值"}
+    if not str(expect):
+        return {"pass": True, "reason": f"{expr} 匹配到 {len(matches)} 个值"}
+    ok = any(weak_eq(m, expect) for m in matches)
+    shown = ", ".join(str(m) for m in matches[:5])
+    return {"pass": ok,
+            "reason": f"{expr} 应含 {expect}，实际匹配 [{shown}]" if not ok else f"{expr} 匹配到 {expect}"}
 
 
 def run_case(case, env, timeout: float = 15.0) -> dict:

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { api } from '../api'
 import FlowDiagram from '../components/FlowDiagram.vue'
 import RecorderModal from '../components/RecorderModal.vue'
@@ -8,6 +8,7 @@ import { confirmDialog, alertDialog, toast } from '../dialog'
 const projects = ref([])
 const pid = ref('')
 const list = ref([])
+const cases = ref([])      // 本项目用例（供「引用用例」步骤选择）
 const editing = ref(null)
 const running = ref(null)
 const envs = ref([])
@@ -32,6 +33,7 @@ onMounted(async () => {
 async function load() {
   list.value = await api(`/flows?project_id=${pid.value}`)
   envs.value = await api(`/projects/${pid.value}/envs`)
+  cases.value = await api(`/projects/${pid.value}/cases`)
 }
 
 function openNew() {
@@ -52,6 +54,7 @@ function addStep(type) {
   const tpl = {
     ui: { role, type: 'ui', action: 'goto', url: '', selector: '', value: '' },
     ai: { role, type: 'ai', goal: '', url: '', max_steps: 15 },
+    case: { role, type: 'case', case_id: '' },
     api: { role, type: 'api', m: 'POST', url: '', headers: '', body: '',
            check: { type: 'status', expect: '200', field: '' }, save: { name: '', from: '' } },
   }
@@ -62,6 +65,7 @@ function onStepType(s) {
   const fresh = { role: s.role, type: s.type }
   if (s.type === 'ui') Object.assign(fresh, { action: 'goto', url: '', selector: '', value: '' })
   else if (s.type === 'ai') Object.assign(fresh, { goal: '', url: '', max_steps: 15 })
+  else if (s.type === 'case') Object.assign(fresh, { case_id: '' })
   else Object.assign(fresh, { m: 'POST', url: '', headers: '', body: '',
     check: { type: 'status', expect: '200', field: '' }, save: { name: '', from: '' } })
   Object.keys(s).forEach(k => delete s[k])
@@ -109,16 +113,47 @@ async function del(f) {
 const runEnv = ref('')
 const runLoading = ref(false)
 const result = ref(null)
+const aiTips = ref(null)
+const aiLoading = ref(false)
+let curRunId = ''
+let pollTimer = null
 
 async function run(f) {
   running.value = await api('/flows/' + f.id)   // 取完整定义（含 roles）
   result.value = null
+  aiTips.value = null
   runEnv.value = envs.value[0]?.id || ''
 }
 async function doRun() {
-  runLoading.value = true; result.value = null
-  try { result.value = await api(`/flows/${running.value.id}/run`, { method: 'POST', body: { env_id: runEnv.value } }) }
-  catch (e) { await alertDialog(e.message, '执行失败') } finally { runLoading.value = false }
+  runLoading.value = true; result.value = null; aiTips.value = null
+  // 后端边执行边把明细写库；请求返回前轮询最新一条 running 记录，步骤实时显示
+  pollTimer = setInterval(async () => {
+    try {
+      const r = await api(`/runs?flow=${running.value.id}&size=1`)
+      const cur = r.items?.[0]
+      if (cur && cur.status === 'running') {
+        curRunId = cur.id
+        result.value = await api('/runs/' + cur.id)
+      }
+    } catch { /* 轮询失败忽略，等下一轮 */ }
+  }, 1200)
+  try {
+    result.value = await api(`/flows/${running.value.id}/run`,
+      { method: 'POST', body: { env_id: runEnv.value } }, { timeout: 600000 })
+  } catch (e) { await alertDialog(e.message, '执行失败') } finally {
+    runLoading.value = false; curRunId = ''
+    clearInterval(pollTimer)
+  }
+}
+async function cancelRun() {
+  if (!curRunId) return
+  try { await api(`/runs/${curRunId}/cancel`, { method: 'POST' }) } catch { /* 已结束则忽略 */ }
+}
+async function analyze() {
+  aiLoading.value = true; aiTips.value = null
+  try { aiTips.value = await api(`/ai/analyze-run/${result.value.id}`, { method: 'POST' }) }
+  catch (e) { aiTips.value = { cause: e.message, suggestion: '', engine: 'error' } }
+  finally { aiLoading.value = false }
 }
 async function viewDetail(r) {
   history.value = null
@@ -131,10 +166,17 @@ async function openHistory(f) {
   historyRows.value = await api(`/flows/${f.id}/runs`)
 }
 
+// 编辑视图给泳道图的步骤（引用用例的步骤补上用例名用于展示）
+const editSteps = computed(() => (editing.value?.steps || []).map(s =>
+  s.type === 'case'
+    ? { ...s, case_name: cases.value.find(c => c.id === s.case_id)?.name || '（未选择用例）' }
+    : s))
+
 // 执行结果里只有 detail；转成泳道图需要的步骤形状（detail 与步骤同序）
 function stepsFor(result) {
-  return result.detail.map(d => ({
-    role: d.role, type: d.type, action: 'goto', url: d.target || '',
+  return (result.detail || []).map(d => ({
+    role: d.role, type: d.type, action: 'goto', url: d.type === 'case' ? '' : (d.target || ''),
+    case_name: d.type === 'case' ? (d.target || '').replace('[用例] ', '') : '',
     goal: d.type === 'ai' ? (d.target || '').replace('[AI] ', '') : '',
     selector: '', value: '', saved: d.saved ? { name: d.saved } : null,
   }))
@@ -192,10 +234,11 @@ function stepsFor(result) {
         <div style="display:flex;gap:6px">
           <button class="btn sm" @click="addStep('ui')">+ 页面操作</button>
           <button class="btn sm" @click="addStep('ai')">+ AI 步骤</button>
+          <button class="btn sm" @click="addStep('case')">+ 引用用例</button>
           <button class="btn sm" @click="addStep('api')">+ 接口调用</button>
         </div>
       </div>
-      <FlowDiagram :roles="editing.roles" :steps="editing.steps" editable @select="selected = $event" />
+      <FlowDiagram :roles="editing.roles" :steps="editSteps" editable @select="selected = $event" />
 
       <div v-for="(s, i) in editing.steps" :key="i" v-show="selected === i" class="step open" style="margin-top:12px">
         <div class="hd">
@@ -211,9 +254,23 @@ function stepsFor(result) {
               <select v-model="s.type" @change="onStepType(s)">
                 <option value="ui">页面操作（无头浏览器）</option>
                 <option value="ai">AI 智能操作（大模型决策）</option>
+                <option value="case">引用用例（复用已有测试）</option>
                 <option value="api">接口调用</option>
               </select></div>
           </div>
+
+          <template v-if="s.type === 'case'">
+            <div class="fld"><label>要引用的用例</label>
+              <select v-model="s.case_id">
+                <option value="" disabled>选择用例…</option>
+                <option v-for="c in cases" :key="c.id" :value="c.id">
+                  {{ c.name }}（{{ c.type === 'ai' ? 'AI' : c.type.toUpperCase() }}）</option>
+              </select></div>
+            <div class="faint" style="font-size:12px;margin:-4px 0 10px;line-height:1.7">
+              用例会在上方所选角色的会话里执行：它内部写的 $&#123;变量&#125; 能读到角色变量与全流程共享变量，
+              save 记住的结果自动进入共享区供后续步骤使用。
+            </div>
+          </template>
 
           <template v-if="s.type === 'ai'">
             <div class="fld"><label>这一步要 AI 做什么（大白话，可引用 ${'{'}变量{'}'} 和共享单号）</label>
@@ -252,10 +309,12 @@ function stepsFor(result) {
                   <option value="contains">返回内容包含…</option>
                   <option value="field_eq">某个字段的值等于…</option>
                   <option value="not_empty">返回了数据（不为空）</option>
+                  <option value="jsonpath">JSONPath 断言（高级）</option>
                 </select></div>
               <div class="fld"><label>期望值 / 字段名</label>
                 <div class="two" style="margin-bottom:0">
-                  <input v-if="['field_eq','not_empty'].includes(s.check.type)" v-model="s.check.field" class="mono" placeholder="data.id">
+                  <input v-if="['field_eq','not_empty','jsonpath'].includes(s.check.type)"
+                    v-model="s.check.field" class="mono" placeholder="data.id 或 $.data.list[*].sku">
                   <input v-model="s.check.expect" class="mono" placeholder="0 或 200">
                 </div></div>
             </div>
@@ -292,14 +351,27 @@ function stepsFor(result) {
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
         <span class="muted">环境</span>
         <select v-model="runEnv"><option v-for="e in envs" :key="e.id" :value="e.id">{{ e.name }}</option></select>
-        <button class="btn pri" style="margin-left:auto" :disabled="runLoading || !runEnv" @click="doRun">
-          {{ runLoading ? '执行中…' : (result ? '再次执行' : '立即执行') }}</button>
+        <button v-if="runLoading" class="btn" style="margin-left:auto" @click="cancelRun">取消执行</button>
+        <button v-else class="btn pri" style="margin-left:auto" :disabled="!runEnv" @click="doRun">
+          {{ result ? '再次执行' : '立即执行' }}</button>
+      </div>
+
+      <div v-if="runLoading" class="muted" style="margin-bottom:12px">
+        <span class="spin" style="border-color:#c8cdd6;border-top-color:var(--acc)"></span>正在执行，完成的步骤会实时出现在下方泳道图…
       </div>
 
       <template v-if="result">
-        <div class="row" style="margin-bottom:12px">
-          <span :class="result.status === 'passed' ? 'st ok' : 'st err'">{{ result.status === 'passed' ? '流程跑通' : '流程中断' }}</span>
+        <div class="row" style="margin-bottom:12px;align-items:center">
+          <span v-if="result.status === 'running'" class="st run"><span class="spin"></span>执行中</span>
+          <span v-else :class="result.status === 'passed' ? 'st ok' : 'st err'">{{ result.status === 'passed' ? '流程跑通' : '流程中断' }}</span>
           <span class="mono muted">{{ result.pass_n }}/{{ result.pass_n + result.fail_n }} 步 · {{ result.duration }}s</span>
+          <button v-if="result.status === 'failed' && !runLoading" class="btn sm" :disabled="aiLoading"
+            style="margin-left:auto" @click="analyze">{{ aiLoading ? '分析中…' : 'AI 分析失败原因' }}</button>
+        </div>
+        <div v-if="aiTips" style="border:1px solid var(--acc-weak);background:var(--acc-weak);border-radius:7px;padding:10px 12px;margin-bottom:12px">
+          <div style="font-size:13px"><b>AI 分析</b> <span class="chip">{{ aiTips.engine === 'builtin' ? '内置规则' : aiTips.engine }}</span></div>
+          <div style="font-size:12.5px;margin-top:5px">可能原因：{{ aiTips.cause }}</div>
+          <div v-if="aiTips.suggestion" style="font-size:12.5px;margin-top:3px">{{ aiTips.suggestion }}</div>
         </div>
         <FlowDiagram v-if="running.roles?.length" :roles="running.roles" :steps="stepsFor(result)" :detail="result.detail" />
         <div v-else class="muted">该流程的角色定义缺失，请重新编辑保存后执行。</div>
