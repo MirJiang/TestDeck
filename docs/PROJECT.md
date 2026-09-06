@@ -87,6 +87,8 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 
 ### 4.2 UI 可视化录制
 - **remote 模式**（默认）：后端起无头浏览器，页面以 JPEG 帧（400ms）串流到网页；用户在画面上点击/输入/跳转，指令经队列回传执行并记录为步骤。支持远程与容器部署，画面区误点不记录、连点去重、连续输入合并。
+- **AI 代劳（混合录制）**：录制中输入一句话目标（如"用 ${username} 登录，看到欢迎页为止"），AI 在当前录制页面上执行（`ai_drive`，每步刷新画面），它的动作自动转成普通录制步骤——**回放零 token**。适合登录、验证码、长表单这类重复操作；流程角色录制时尤为省事。可选注入某个环境的变量；坐标类动作（点选验证码）不记入步骤。
+- **录完 AI 增强**：完成录制后可一键让大模型补充关键断言（expect_text）、把账号/密码类输入参数化为 `${变量}`（附建议默认值）、起用例名；未配置模型时原样返回并引导，原始步骤随时可用。
 - **local 模式**：后端本机弹出有头浏览器，注入脚本记录，关窗后编译步骤（仅本地开发可用）。
 
 ### 4.3 AI 智能测试
@@ -179,7 +181,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 ## 9. 测试
 
 ```bash
-cd backend && .venv/Scripts/python -m pytest tests -q     # 72 个单元/接口测试
+cd backend && .venv/Scripts/python -m pytest tests -q     # 75 个单元/接口测试
 # E2E（需先起后端与 mock 被测系统 9001）：
 tests/e2e.py e2e_m2.py e2e_m3.py e2e_m5.py e2e_flow.py
 # 假 LLM 服务器（AI 引擎联调用）：uvicorn tests.fake_llm:app --port 9111

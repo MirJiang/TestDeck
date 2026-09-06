@@ -156,12 +156,29 @@ def _exec_cmd(sess: dict, page, cmd: dict) -> dict:
     if op == "goto":
         url = (cmd.get("url") or "").strip()
         if not url.startswith(("http://", "https://")):
-            return {"ok": False, "error": "地址需以 http(s):// 开头"}
+            return {"ok": False, "error": "地址需以 http(s://) 开头"}
         page.goto(url, timeout=30000)
         with _lock:
             sess["events"].append({"type": "goto", "url": url})
         sess["page_url"] = url
         return {"ok": True}
+    if op == "ai":
+        # 混合录制：让 AI 在当前页面上完成一个目标（登录/过验证码/填长表单…），
+        # 它的动作转成普通录制事件——回放零 token
+        goal = (cmd.get("goal") or "").strip()
+        if not goal:
+            return {"ok": False, "error": "请先告诉 AI 这一步要做什么"}
+        from .ai_runner import ai_drive
+        r = ai_drive(page, goal, cmd.get("vars") or {},
+                     max_steps=int(cmd.get("max_steps") or 12),
+                     run_id=f"rec{int(time.time() * 1000) % 10**9:09d}",
+                     shot_tag=f"ai{len(sess['events'])}",
+                     on_step=lambda _d: _snap(sess, page))   # AI 每走一步刷一帧，画面不静止
+        n = _append_ai_events(sess, r.get("detail") or [])
+        ok = r.get("status") == "passed"
+        return {"ok": ok, "ai_steps": n,
+                "error": "" if ok else (r.get("summary") or "AI 未完成目标")[:200],
+                "summary": (r.get("summary") or "")[:200]}
     if op == "scroll":
         page.mouse.wheel(0, int(cmd.get("dy", 300)))
         return {"ok": True}
@@ -171,6 +188,28 @@ def _exec_cmd(sess: dict, page, cmd: dict) -> dict:
     if op == "finish":
         return {"ok": True}
     return {"ok": False, "error": f"不支持的操作：{op}"}
+
+
+def _append_ai_events(sess: dict, actions: list) -> int:
+    """把 AI 执行的动作明细转成录制事件（与人工录制同构），返回转换条数。
+
+    坐标类动作（click_xy/drag）没有稳定选择器，不转换；done/save 是控制指令，不转换。
+    """
+    n = 0
+    with _lock:
+        for a in actions:
+            act = a.get("action")
+            if act == "goto" and a.get("url"):
+                sess["events"].append({"type": "goto", "url": a["url"]}); n += 1
+            elif act == "click" and a.get("selector"):
+                sess["events"].append({"type": "click", "sel": a["selector"],
+                                       "tag": "", "text": ""}); n += 1
+            elif act == "fill" and a.get("selector"):
+                sess["events"].append({"type": "fill", "sel": a["selector"],
+                                       "value": str(a.get("value", ""))}); n += 1
+            elif act == "expect_text" and a.get("value"):
+                sess["events"].append({"type": "expect_text", "value": a["value"]}); n += 1
+    return n
 
 
 def _snap(sess: dict, page):
@@ -279,6 +318,8 @@ def compile_steps(session_id: str) -> dict:
         elif t == "fill":
             if ev.get("sel"):
                 event_steps.append({"action": "fill", "url": "", "selector": ev["sel"], "value": ev.get("value", "")})
+        elif t == "expect_text":
+            event_steps.append({"action": "expect_text", "url": "", "selector": "", "value": ev.get("value", "")})
         elif t == "goto":
             event_steps.append({"action": "goto", "url": ev.get("url", ""), "selector": "", "value": ""})
     # 首步固定为打开起始地址；合并对同一输入框的连续 fill；连续点同一元素只记一次；

@@ -11,10 +11,19 @@ const c = computed(() => props.modelValue)
 const isUI = computed(() => (c.value.target || 'ui') === 'ui')
 const recOpen = ref(false)
 const recMsg = ref('')
+const envs = ref([])   // 供录制弹窗「AI 代劳」注入环境变量
+
+async function openRec() {
+  recOpen.value = true
+  if (!envs.value.length && c.value.project_id) {
+    try { envs.value = await api(`/projects/${c.value.project_id}/envs`) } catch { /* 无环境也能录 */ }
+  }
+}
 
 function onRecDone(steps) {
   c.value.fixedSteps = steps
   recMsg.value = `录制完成，共 ${steps.length} 步，保存后按固定步骤回放（零 token）。`
+  recOpen.value = false
 }
 
 function delFixed(i) { c.value.fixedSteps.splice(i, 1) }
@@ -133,7 +142,7 @@ function save() { emit('save', JSON.parse(JSON.stringify(c.value))) }
         <div class="panel" style="background:#fcfcfd">
           <div class="bar" style="margin-bottom:6px">
             <h3 style="font-size:13px">固定步骤（可选，替代 AI 自由探索）</h3>
-            <button class="btn sm" @click="recOpen = true">录制生成</button>
+            <button class="btn sm" @click="openRec">录制生成</button>
           </div>
           <div v-if="recMsg" class="muted" style="font-size:12.5px;margin-bottom:6px">{{ recMsg }}</div>
           <div v-if="(c.fixedSteps || []).length">
@@ -206,5 +215,5 @@ function save() { emit('save', JSON.parse(JSON.stringify(c.value))) }
     </div>
     <div class="df"><button class="btn" @click="emit('close')">取消</button><button class="btn pri" @click="save">保存用例</button></div>
   </div>
-  <RecorderModal v-if="recOpen" title="录制固定步骤" @done="onRecDone" @close="recOpen = false" />
+  <RecorderModal v-if="recOpen" title="录制固定步骤" :envs="envs" @done="onRecDone" @close="recOpen = false" />
 </template>

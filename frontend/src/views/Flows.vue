@@ -341,7 +341,7 @@ function stepsFor(result) {
     <div class="df"><button class="btn" @click="editing = null">取消</button><button class="btn pri" @click="save">保存流程</button></div>
   </div>
 
-  <RecorderModal v-if="recOpen && editing" title="为角色录制操作"
+  <RecorderModal v-if="recOpen && editing" title="为角色录制操作" :envs="envs"
     :role-note="`以「${recRole?.name}」的身份录制`" @done="onRecDone" @close="recOpen = false" />
 
   <!-- 执行抽屉（泳道图 + 截图） -->

@@ -145,13 +145,17 @@ from fastapi import Query, Response
 
 
 class RecordCmdIn(BaseModel):
-    op: str                    # click | fill | goto | scroll | back | finish
+    op: str                    # click | fill | goto | ai | scroll | back | finish
     x: int = 0
     y: int = 0
     url: str = ""
     selector: str = ""
     value: str = ""
     dy: int = 0
+    # op=ai 混合录制：让 AI 在录制页面上完成一个目标
+    goal: str = ""
+    vars: dict = {}
+    max_steps: int = 12
 
 
 @router.post("/cases/ui-record/start")
@@ -182,9 +186,11 @@ def ui_record_frame(sid: str, user: User = Depends(current_user)):
 
 @router.post("/cases/ui-record/{sid}/cmd")
 def ui_record_cmd(sid: str, body: RecordCmdIn, user: User = Depends(current_user)):
-    """在录制中的页面上执行一条用户指令（点击/输入/跳转/滚动/完成）。"""
+    """在录制中的页面上执行一条用户指令（点击/输入/跳转/AI 代劳/滚动/完成）。"""
     from ..engine.ui_recorder import send_cmd
-    return send_cmd(sid, body.model_dump())
+    # AI 代劳涉及多轮大模型决策，放宽等待；其余指令维持短超时
+    timeout = 170.0 if body.op == "ai" else 35.0
+    return send_cmd(sid, body.model_dump(), timeout=timeout)
 
 
 @router.get("/cases/ui-record/{sid}")

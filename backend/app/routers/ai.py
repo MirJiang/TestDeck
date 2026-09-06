@@ -6,6 +6,7 @@ from ..db import get_db
 from ..models import User, Project, TestCase, TestRun, GitRepo, CommitSync
 from ..auth import current_user
 from .. import ai as A
+import json
 
 router = APIRouter(prefix="/api/v1/ai", tags=["ai"])
 
@@ -148,6 +149,41 @@ async def analyze_run(run_id: str, db: Session = Depends(get_db), user: User = D
 def get_usage(user: User = Depends(current_user)):
     from ..ai import usage_summary
     return usage_summary()
+
+
+class EnhanceIn(BaseModel):
+    steps: list[dict] = []     # 可视化录制产出的 UI 步骤
+    url: str = ""              # 录制的起始地址（给模型上下文）
+    name: str = ""             # 可选：已有用例名
+
+
+@router.post("/enhance-steps")
+async def enhance_steps(body: EnhanceIn, user: User = Depends(current_user)):
+    """录制步骤 AI 增强：补关键断言、参数化测试数据、建议用例名。
+
+    大模型未配置或返回无效时原样返回（enhanced=False），前端引导直接使用原始步骤。
+    """
+    if not body.steps:
+        raise HTTPException(400, "没有可增强的步骤")
+    sys_prompt = (
+        "你是 UI 自动化用例评审助手。输入是可视化录制得到的步骤"
+        '（action ∈ goto/click/fill/expect_text，含 url/selector/value 字段）。返回 JSON：'
+        '{"name":"建议的用例名","steps":[增强后的步骤数组],"note":"改动说明","vars":{"变量名":"原值"}}。'
+        "要求：1) 保持原有动作的顺序与内容不变；"
+        "2) 只在关键动作（提交/登录/保存等）之后插入 expect_text 断言，没把握就不要编造；"
+        "3) fill 的 value 中像账号/密码/手机号/邮箱的值替换为 ${username} 这类变量，"
+        "并在 vars 里给出原值；普通业务数据保持原样；"
+        "4) 除插入断言与参数化外不要增删改任何步骤。只输出 JSON。"
+    )
+    payload = json.dumps({"url": body.url, "steps": body.steps[:80]}, ensure_ascii=False)
+    out = await A.chat_json(sys_prompt, payload, kind="gen-text")
+    if out and isinstance(out.get("steps"), list) and out["steps"]:
+        return {"enhanced": True, "name": str(out.get("name") or body.name),
+                "steps": out["steps"], "note": str(out.get("note") or ""),
+                "vars": out.get("vars") or {}, "engine": A.current_model()}
+    return {"enhanced": False, "name": body.name, "steps": body.steps,
+            "note": "大模型未配置或未返回有效结果，已保留原始录制步骤（可到「系统设置」配置模型后再试）",
+            "vars": {}, "engine": "builtin"}
 
 
 @router.get("/regression-advice")
