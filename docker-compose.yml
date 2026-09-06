@@ -1,0 +1,37 @@
+# 部署配置全部来自项目根的 .env 文件（模板见 .env.example）。
+# 启动前必须：cp .env.example .env，并配置 TD_DATABASE_URL（下方 db 服务的连接串）。
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: testdeck
+      POSTGRES_PASSWORD: testdeck
+      POSTGRES_DB: testdeck
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testdeck"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    volumes:
+      - ./.env:/app/.env:ro        # 配置文件挂载（TD_DATABASE_URL 等都在这里）
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pgdata:

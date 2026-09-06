@@ -1,0 +1,11 @@
+# 低配服务器用：不安装 Chromium（约省 500MB 镜像与对应运行内存），
+# UI/AI 测试通过 connect_over_cdp 走 Lightpanda 服务（见 docker-compose.lowmem.yml）。
+# 运行配置全部来自挂载进容器的 .env 文件（见 compose 注释），不使用环境变量。
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app ./app
+VOLUME /data
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

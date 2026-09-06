@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TestDeck · 自动化测试平台</title>
+<style>
+:root{
+  --ink:#16181d; --txt:#3a3f47; --sub:#878e99; --faint:#aab0ba;
+  --line:#e6e8ec; --line2:#f0f2f5;
+  --bg:#fafafa; --panel:#ffffff;
+  --acc:#2f6fed; --acc-weak:#eef3fe;
+  --ok:#1f9d55; --ok-bg:#eef7f1;
+  --warn:#b7791f; --warn-bg:#faf5ea;
+  --err:#d14343; --err-bg:#fdf0f0;
+  --mono:"SF Mono",Consolas,"Cascadia Mono",Menlo,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{font-size:14px}
+body{font-family:-apple-system,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;background:var(--bg);color:var(--txt);-webkit-font-smoothing:antialiased}
+a{color:var(--acc);text-decoration:none;cursor:pointer}
+a:hover{text-decoration:underline}
+button{cursor:pointer;font:inherit;border:none;background:none;color:inherit}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border:1px solid var(--line);border-radius:5px;background:#fff;color:var(--txt);font-size:13.5px;transition:.12s}
+.btn:hover{border-color:var(--faint)}
+.btn.pri{background:var(--ink);border-color:var(--ink);color:#fff}
+.btn.pri:hover{background:#2a2d34}
+.btn:disabled{opacity:.45;cursor:default}
+.btn.sm{padding:2px 8px;font-size:13px}
+input,select,textarea{font:inherit;font-size:13.5px;border:1px solid var(--line);border-radius:5px;padding:5px 9px;background:#fff;color:var(--txt);outline:none;transition:.12s}
+input:focus,select:focus,textarea:focus{border-color:var(--acc);box-shadow:0 0 0 2px var(--acc-weak)}
+::placeholder{color:var(--faint)}
+table{width:100%;border-collapse:collapse}
+th{font-weight:500;font-size:13.5px;color:var(--sub);text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);letter-spacing:.03em;white-space:nowrap}
+td{padding:9px 10px;border-bottom:1px solid var(--line2);font-size:13.5px;vertical-align:middle}
+tbody tr:hover td{background:#f7f8fa}
+.mono{font-family:var(--mono);font-size:13px}
+.muted{color:var(--sub)}
+.faint{color:var(--faint)}
+
+/* ---- layout ---- */
+.layout{display:flex;min-height:100vh}
+.side{width:196px;background:var(--ink);color:#aeb6c2;flex-shrink:0;display:flex;flex-direction:column;position:sticky;top:0;height:100vh}
+.brand{padding:18px 18px 16px;color:#fff;font-size:16px;font-weight:600;letter-spacing:.02em;border-bottom:1px solid rgba(255,255,255,.07)}
+.brand em{font-style:normal;color:#5b8def;font-family:var(--mono)}
+.nav{flex:1;padding:10px 10px}
+.nav .cap{font-size:13.5px;color:#5c6470;letter-spacing:.12em;padding:12px 8px 5px}
+.nav .it{display:block;width:100%;text-align:left;padding:7px 10px;border-radius:5px;color:#aeb6c2;font-size:14px;margin-bottom:1px}
+.nav .it:hover{background:rgba(255,255,255,.06);color:#fff}
+.nav .it.on{background:rgba(91,141,239,.16);color:#fff}
+.nav .it .n{float:right;font-family:var(--mono);font-size:13px;color:#5c6470;line-height:22px}
+.side .me{padding:12px 16px;border-top:1px solid rgba(255,255,255,.07);display:flex;align-items:center;gap:9px;font-size:13px}
+.side .me .dot{width:26px;height:26px;border-radius:50%;background:#313640;color:#9aa3b0;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:13.5px}
+.main{flex:1;min-width:0}
+.top{height:46px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 22px;position:sticky;top:0;z-index:20}
+.top .path{font-size:13.5px;color:var(--sub)}
+.top .path b{color:var(--txt);font-weight:600}
+.body{padding:22px 28px 40px}
+.page{display:none}.page.on{display:block}
+.hd{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:16px}
+.hd h2{font-size:16px;font-weight:600;color:var(--ink)}
+.hd .sub{font-size:13px;color:var(--sub);margin-top:3px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin-bottom:18px}
+.panel .bar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px;flex-wrap:wrap}
+.panel h3{font-size:13px;font-weight:600;color:var(--ink)}
+
+/* ---- pills / status ---- */
+.st{display:inline-flex;align-items:center;gap:5px;font-size:13.5px;padding:1px 8px;border-radius:99px;line-height:18px;white-space:nowrap}
+.st::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}
+.st.ok{color:var(--ok);background:var(--ok-bg)}
+.st.err{color:var(--err);background:var(--err-bg)}
+.st.warn{color:var(--warn);background:var(--warn-bg)}
+.st.off{color:var(--sub);background:var(--line2)}
+.st.run{color:var(--acc);background:var(--acc-weak)}
+.chip{display:inline-block;font-family:var(--mono);font-size:13.5px;color:var(--sub);background:var(--line2);border-radius:4px;padding:1px 6px;margin:1px 2px 1px 0}
+.tag-api{font-family:var(--mono);font-size:13.5px;color:var(--acc);background:var(--acc-weak);border-radius:4px;padding:1px 6px}
+.tag-ui{font-family:var(--mono);font-size:13.5px;color:var(--warn);background:var(--warn-bg);border-radius:4px;padding:1px 6px}
+
+/* ---- overview numbers ---- */
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid var(--line);border-radius:8px;background:var(--panel);margin-bottom:18px}
+.grid4>div{padding:14px 18px;border-right:1px solid var(--line2)}
+.grid4>div:last-child{border-right:none}
+.grid4 .k{font-size:13.5px;color:var(--sub)}
+.grid4 .v{font-size:21px;font-weight:600;color:var(--ink);margin-top:4px;font-variant-numeric:tabular-nums}
+.grid4 .d{font-size:13.5px;color:var(--faint);margin-top:2px}
+
+/* ---- pass bar ---- */
+.pass{display:inline-flex;align-items:center;gap:8px}
+.pass .track{width:110px;height:4px;border-radius:2px;background:var(--line2);overflow:hidden}
+.pass .track i{display:block;height:100%;background:var(--ok)}
+.pass .track i.bad{background:var(--err)}
+.pass .pct{font-family:var(--mono);font-size:13.5px;color:var(--sub)}
+
+/* ---- step editor ---- */
+.step{border:1px solid var(--line);border-radius:7px;margin-bottom:9px;background:#fff}
+.step>.hd{display:flex;align-items:center;gap:9px;padding:7px 11px;cursor:pointer;border-radius:7px}
+.step>.hd:hover{background:#f7f8fa}
+.step .idx{font-family:var(--mono);font-size:13.5px;color:var(--sub);background:var(--line2);border-radius:4px;padding:1px 7px}
+.step .m{font-family:var(--mono);font-size:13.5px;font-weight:600;color:var(--acc);width:48px}
+.step .u{font-family:var(--mono);font-size:13px;color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.step .as{margin-left:auto;font-size:13.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}
+.step .del{color:var(--faint);font-size:13px;padding:0 3px}
+.step .del:hover{color:var(--err)}
+.step .bd{border-top:1px solid var(--line2);padding:12px 12px 13px;display:none}
+.step.open .bd{display:block}
+.fld{margin-bottom:10px}
+.fld label{display:block;font-size:13.5px;color:var(--sub);margin-bottom:4px}
+.fld input,.fld textarea,.fld select{width:100%}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.reqline{display:grid;grid-template-columns:92px 1fr auto;gap:8px;align-items:center;margin-bottom:10px}
+
+/* ---- modal / drawer ---- */
+.mask{position:fixed;inset:0;background:rgba(22,24,29,.4);display:none;z-index:50;align-items:flex-start;justify-content:center;padding-top:10vh}
+.mask.on{display:flex}
+.modal{background:#fff;border-radius:9px;width:520px;max-width:92vw;padding:20px 22px;box-shadow:0 16px 48px rgba(0,0,0,.14)}
+.modal h3{font-size:14px;font-weight:600;color:var(--ink);margin-bottom:15px}
+.modal .ft{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.drawer{position:fixed;top:0;right:-600px;width:600px;max-width:95vw;height:100vh;background:#fff;z-index:60;transition:right .22s ease;box-shadow:-6px 0 28px rgba(0,0,0,.1);display:flex;flex-direction:column;border-left:1px solid var(--line)}
+.drawer.on{right:0}
+.drawer .dh{padding:13px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}
+.drawer .dh h3{font-size:14px;font-weight:600;color:var(--ink)}
+.drawer .x{color:var(--faint);font-size:15px;padding:2px 6px;border-radius:4px}
+.drawer .x:hover{color:var(--txt);background:var(--line2)}
+.drawer .db{flex:1;overflow:auto;padding:18px 20px}
+.drawer .df{padding:11px 20px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:8px;background:#fcfcfd;border-radius:0 0 0 0}
+
+/* ---- console ---- */
+.term{background:#16181d;border-radius:7px;padding:13px 15px;font-family:var(--mono);font-size:13px;line-height:1.75;max-height:320px;overflow:auto}
+.term div{white-space:pre-wrap}
+.term .i{color:#8b93a1}.term .ok{color:#7ec49a}.term .err{color:#e88}.term .dim{color:#565e6b}
+.spin{display:inline-block;width:11px;height:11px;border:2px solid #ffffff44;border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px;margin-right:6px}
+@keyframes sp{to{transform:rotate(360deg)}}
+pre.resp{background:var(--line2);border-radius:6px;padding:9px 11px;font-family:var(--mono);font-size:13.5px;overflow:auto;line-height:1.6}
+.toast{position:fixed;top:14px;left:50%;transform:translateX(-50%) translateY(-6px);background:var(--ink);color:#e8eaee;padding:7px 16px;border-radius:6px;z-index:99;font-size:13.5px;opacity:0;pointer-events:none;transition:.2s}
+/* 快速开始 */
+.sg-row{display:flex;align-items:center}
+.sg{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--txt);white-space:nowrap}
+.sg-n{width:22px;height:22px;border-radius:50%;background:var(--acc);color:#fff;font-size:12.5px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.sg-line{flex:1;height:1px;background:var(--line);min-width:20px;margin:0 12px}
+/* 高级选项折叠 */
+.adv{border-top:1px dashed var(--line);margin-top:6px;padding-top:9px}
+.adv>.tg{font-size:13px;color:var(--sub);cursor:pointer;display:inline-flex;align-items:center;gap:5px}
+.adv>.tg:hover{color:var(--acc)}
+.adv .bd2{display:none;margin-top:9px}
+.adv.open .bd2{display:block}
+.adv>.tg .arr{display:inline-block;transition:.15s;font-size:10px;color:var(--faint)}
+.adv.open>.tg .arr{transform:rotate(90deg)}
+.toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+.empty{text-align:center;color:var(--faint);padding:34px 0;font-size:13.5px}
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="side">
+    <div class="brand">Test<em>Deck</em></div>
+    <nav class="nav">
+      <div class="cap">概览</div>
+      <button class="it on" data-p="dash">工作台</button>
+      <button class="it" data-p="runs">执行记录 <span class="n">128</span></button>
+      <div class="cap">测试资产</div>
+      <button class="it" data-p="projects">项目 <span class="n">3</span></button>
+      <button class="it" data-p="cases">用例 <span class="n">46</span></button>
+      <button class="it" data-p="envs">环境 <span class="n">3</span></button>
+      <div class="cap">调度</div>
+      <button class="it" data-p="plans">测试计划</button>
+      <button class="it" data-p="crons">定时任务 <span class="n">2</span></button>
+    </nav>
+    <div class="me"><div class="dot">ZW</div><div>张伟<br><span class="faint" style="font-size:13.5px">管理员</span></div></div>
+  </aside>
+
+  <div class="main">
+    <div class="top">
+      <div class="path" id="crumb">工作台</div>
+      <div style="display:flex;gap:8px"><button class="btn sm" onclick="go('runs')">执行记录</button><button class="btn sm pri" onclick="go('cases');openCase()">新建用例</button></div>
+    </div>
+
+    <div class="body">
+
+      <!-- 工作台 -->
+      <section class="page on" id="p-dash">
+        <div class="hd"><div><h2>工作台</h2><div class="sub">2026-09-04 · 数据每 30s 刷新</div></div></div>
+        <div class="panel" style="display:flex;align-items:center;gap:22px;background:linear-gradient(90deg,#ffffff,#f4f8fe)">
+          <div style="flex:1">
+            <div class="sg-row">
+              <div class="sg"><span class="sg-n">1</span>填一个接口地址</div><div class="sg-line"></div>
+              <div class="sg"><span class="sg-n">2</span>加上检查点</div><div class="sg-line"></div>
+              <div class="sg"><span class="sg-n">3</span>点执行，看结果</div>
+            </div>
+            <div class="muted" style="margin-top:9px;font-size:13px">不用写代码，像填表一样完成一次接口测试。<a onclick="go('cases');openCase()">现在试一试 →</a></div>
+          </div>
+        </div>
+        <div class="grid4">
+          <div><div class="k">用例总数</div><div class="v">46</div><div class="d">API 38 · UI 8</div></div>
+          <div><div class="k">今日执行</div><div class="v">12</div><div class="d">定时 8 · 手动 4</div></div>
+          <div><div class="k">今日通过率</div><div class="v">91.7%</div><div class="d">11 通过 · 1 失败</div></div>
+          <div><div class="k">失败待处理</div><div class="v" style="color:var(--err)">1</div><div class="d">库存扣减并发校验</div></div>
+        </div>
+        <div class="panel">
+          <div class="bar"><h3>最近执行</h3><a onclick="go('runs')">全部记录 →</a></div>
+          <table>
+            <thead><tr><th>执行 ID</th><th>来源</th><th>环境</th><th>通过率</th><th>耗时</th><th>触发</th><th>时间</th><th></th></tr></thead>
+            <tbody id="dashRuns"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 项目 -->
+      <section class="page" id="p-projects">
+        <div class="hd"><div><h2>项目</h2><div class="sub">用例与环境挂在项目下维护</div></div>
+          <button class="btn pri" onclick="openProj()">新建项目</button></div>
+        <div class="panel">
+          <div class="bar"><input placeholder="筛选项目名…" style="width:200px" oninput="renderProjs(this.value)"><span class="muted" id="projCnt"></span></div>
+          <table>
+            <thead><tr><th>名称</th><th>说明</th><th>用例</th><th>负责人</th><th>创建于</th><th></th></tr></thead>
+            <tbody id="projList"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 环境 -->
+      <section class="page" id="p-envs">
+        <div class="hd"><div><h2>环境</h2><div class="sub">同一套测试可以在不同环境（测试 / 预发 / 生产）之间一键切换</div></div>
+          <button class="btn pri" onclick="openEnv()">新建环境</button></div>
+        <div class="panel">
+          <table>
+            <thead><tr><th>名称</th><th>Base URL</th><th>变量</th><th></th></tr></thead>
+            <tbody id="envList"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 用例 -->
+      <section class="page" id="p-cases">
+        <div class="hd"><div><h2>用例</h2><div class="sub">填地址、加检查点就能测；也可以让 AI 从 Git 提交里自动生成</div></div>
+          <div style="display:flex;gap:8px">
+            <button class="btn" onclick="openAi()">AI · 从 Git 提交生成</button>
+            <button class="btn pri" onclick="openCase()">新建用例</button>
+          </div></div>
+        <div class="panel">
+          <div class="bar">
+            <div style="display:flex;gap:8px">
+              <select id="caseProj" onchange="renderCases()"></select>
+              <select id="caseType" onchange="renderCases()"><option value="">全部类型</option><option>API</option><option>UI</option></select>
+              <input id="caseSearch" placeholder="筛选用例名…" style="width:190px" oninput="renderCases()">
+            </div>
+            <span class="muted" id="caseCnt"></span>
+          </div>
+          <table>
+            <thead><tr><th>用例</th><th>项目</th><th>类型</th><th>步骤</th><th>最近结果</th><th>更新</th><th></th></tr></thead>
+            <tbody id="caseList"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 计划 -->
+      <section class="page" id="p-plans">
+        <div class="hd"><div><h2>测试计划</h2><div class="sub">把一批用例打包，设置好环境，可以随时或定期自动执行</div></div>
+          <button class="btn pri" onclick="toast('演示环境：新建计划暂未实现')">新建计划</button></div>
+        <div class="panel">
+          <table>
+            <thead><tr><th>计划</th><th>范围</th><th>环境</th><th>调度</th><th>状态</th><th></th></tr></thead>
+            <tbody id="planList"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 执行记录 -->
+      <section class="page" id="p-runs">
+        <div class="hd"><div><h2>执行记录</h2><div class="sub">共 128 次 · 平均通过率 93.2% · 平均耗时 8.4s</div></div>
+          <div style="display:flex;gap:8px"><select><option>近 7 天</option><option>近 30 天</option><option>全部</option></select><button class="btn" onclick="toast('演示：导出 CSV')">导出</button></div></div>
+        <div class="panel">
+          <table>
+            <thead><tr><th>执行 ID</th><th>来源</th><th>环境</th><th>结果</th><th>耗时</th><th>触发</th><th>时间</th><th></th></tr></thead>
+            <tbody id="runList"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 定时任务 -->
+      <section class="page" id="p-crons">
+        <div class="hd"><div><h2>定时任务</h2><div class="sub">到点自动执行测试计划，失败会通知</div></div></div>
+        <div class="panel">
+          <table>
+            <thead><tr><th>任务</th><th>执行频率</th><th>下次执行</th><th>状态</th><th>最近结果</th><th></th></tr></thead>
+            <tbody id="cronList"></tbody>
+          </table>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<!-- 项目弹窗 -->
+<div class="mask" id="mProj">
+  <div class="modal">
+    <h3 id="projTitle">新建项目</h3>
+    <div class="fld"><label>项目名称</label><input id="fProjName" placeholder="商城中台"></div>
+    <div class="fld"><label>说明</label><textarea id="fProjDesc" rows="3" placeholder="一句话描述项目范围"></textarea></div>
+    <div class="fld"><label>负责人</label><input id="fProjOwner" placeholder="默认为创建人"></div>
+    <div class="ft"><button class="btn" onclick="closeM('mProj')">取消</button><button class="btn pri" onclick="saveProj()">保存</button></div>
+  </div>
+</div>
+
+<!-- 环境弹窗 -->
+<div class="mask" id="mEnv">
+  <div class="modal">
+    <h3>新建环境</h3>
+    <div class="fld"><label>名称</label><input id="fEnvName" placeholder="测试环境"></div>
+    <div class="fld"><label>Base URL</label><input id="fEnvUrl" class="mono" placeholder="https://test-api.example.com"></div>
+    <div class="fld"><label>变量（每行 key=value）</label><textarea id="fEnvVars" rows="5" class="mono" placeholder="username=admin&#10;password=******"></textarea></div>
+    <div class="ft"><button class="btn" onclick="closeM('mEnv')">取消</button><button class="btn pri" onclick="saveEnv()">保存</button></div>
+  </div>
+</div>
+
+<!-- 用例编辑抽屉 -->
+<div class="drawer" id="dCase">
+  <div class="dh"><h3 id="dCaseTitle">新建用例</h3><button class="x" onclick="closeD()">✕</button></div>
+  <div class="db">
+    <div class="fld"><label>用例名称</label><input id="fCaseName" placeholder="登录并获取用户信息"></div>
+    <div class="two">
+      <div class="fld"><label>项目</label><select id="fCaseProj"></select></div>
+      <div class="fld"><label>类型</label><select id="fCaseType"><option>API</option><option>UI</option></select></div>
+    </div>
+    <div class="fld" style="margin-bottom:6px"><label>测试步骤 <span class="faint">（按顺序执行，每一步都会被检查）</span></label></div>
+    <div id="steps"></div>
+    <button class="btn" onclick="addStep()">+ 添加一步</button>
+    <div style="margin-top:14px;padding:10px 12px;background:var(--line2);border-radius:6px;font-size:13px;color:var(--sub);line-height:1.8">
+      💡 提示：第一步可以「记住」登录返回的 token，后面的步骤会自动带上它，不用手动复制。
+    </div>
+  </div>
+  <div class="df"><button class="btn" onclick="closeD()">取消</button><button class="btn pri" onclick="saveCase()">保存用例</button></div>
+</div>
+
+<!-- 执行抽屉 -->
+<div class="drawer" id="dRun">
+  <div class="dh"><h3 id="dRunTitle">执行</h3><button class="x" onclick="closeD()">✕</button></div>
+  <div class="db">
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
+      <span class="muted">环境</span><select id="runEnv"></select>
+      <button class="btn pri" id="runBtn" onclick="doRun()" style="margin-left:auto">立即执行</button>
+    </div>
+    <div class="term" id="term" style="display:none"></div>
+    <div id="runResult"></div>
+  </div>
+</div>
+
+<!-- 报告抽屉 -->
+<div class="drawer" id="dReport">
+  <div class="dh"><h3 id="dRepTitle">执行报告</h3><button class="x" onclick="closeD()">✕</button></div>
+  <div class="db" id="dRepBody"></div>
+</div>
+
+<!-- AI 生成抽屉 -->
+<div class="drawer" id="dAi">
+  <div class="dh"><h3>AI · 从 Git 提交生成用例</h3><button class="x" onclick="closeD()">✕</button></div>
+  <div class="db">
+    <div class="muted" style="margin-bottom:12px;font-size:13px">AI 会分析提交内容，找出受影响的接口：已有用例的提示执行，没有的生成用例草稿，<b>保存前由你确认</b>。</div>
+    <div class="fld"><label>仓库 · 商城中台 (github.com/shop/mall)</label></div>
+    <div id="aiCommits"></div>
+    <div style="margin-top:12px"><button class="btn pri" id="aiBtn" onclick="doAi()">分析选中的提交</button></div>
+    <div id="aiResult"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ---- data ---- */
+const projects=[
+  {id:1,name:"商城中台",desc:"订单 / 商品 / 用户核心接口",owner:"张伟",created:"08-12",cases:22},
+  {id:2,name:"支付网关",desc:"渠道对接与回调验签",owner:"李娜",created:"08-20",cases:16},
+  {id:3,name:"运营后台",desc:"管理后台 UI 回归",owner:"王强",created:"09-01",cases:8},
+];
+const envs=[
+  {id:1,name:"测试",url:"https://test-api.example.com",vars:{username:"admin",password:"******"}},
+  {id:2,name:"预发",url:"https://staging-api.example.com",vars:{username:"stg_admin",password:"******"}},
+  {id:3,name:"生产只读",url:"https://api.example.com",vars:{}},
+];
+const cases=[
+  {id:101,name:"登录并获取用户信息",proj:"商城中台",type:"API",steps:3,last:"pass",updated:"09-03",
+   detail:[
+    {m:"POST",url:"/api/login",body:'{"username":"${username}","password":"${password}"}',extract:"token=$.data.token",assert:"status == 200"},
+    {m:"GET",url:"/api/user/info",hdr:"Authorization: Bearer ${token}",assert:"$.code == 0"},
+    {m:"GET",url:"/api/user/orders?page=1",assert:"$.data.list.length > 0"}]},
+  {id:102,name:"创建订单 → 取消订单",proj:"商城中台",type:"API",steps:4,last:"pass",updated:"09-02",detail:[]},
+  {id:103,name:"库存扣减并发校验",proj:"商城中台",type:"API",steps:5,last:"fail",updated:"09-04",detail:[]},
+  {id:201,name:"支付宝创建支付单",proj:"支付网关",type:"API",steps:2,last:"pass",updated:"08-29",detail:[]},
+  {id:202,name:"回调验签异常分支",proj:"支付网关",type:"API",steps:3,last:"pass",updated:"09-01",detail:[]},
+  {id:301,name:"后台登录 → 新建商品",proj:"运营后台",type:"UI",steps:6,last:"pass",updated:"09-03",detail:[]},
+];
+const plans=[
+  {name:"商城中台 · 冒烟",scope:"6 用例",env:"测试",cron:"0 8 * * *",cronTxt:"每天 08:00",next:"09-05 08:00",on:true,last:"ok"},
+  {name:"支付网关 · 回归",scope:"16 用例",env:"预发",cron:"0 9 * * 1",cronTxt:"每周一 09:00",next:"09-07 09:00",on:true,last:"err"},
+  {name:"商城中台 · 合并自动回归",scope:"6 用例",env:"测试",cron:"",cronTxt:"",git:"main 分支合并时",next:"合并后自动",on:true,last:""},
+  {name:"发版前全量",scope:"46 用例",env:"测试",cron:"—",cronTxt:"手动",next:"—",on:false,last:""},
+];
+const runs=[
+  {id:"R-128",src:"计划 · 商城中台冒烟",env:"测试",res:{p:6,f:0},t:"6.2s",by:"定时",time:"09-04 08:00"},
+  {id:"R-127",src:"计划 · 支付网关回归",env:"预发",res:{p:15,f:1},t:"23.8s",by:"定时",time:"09-04 09:00"},
+  {id:"R-126",src:"用例 · 库存扣减并发校验",env:"测试",res:{p:0,f:1},t:"4.1s",by:"手动 · 张伟",time:"09-04 14:22"},
+  {id:"R-125",src:"计划 · 商城中台冒烟",env:"测试",res:{p:6,f:0},t:"5.9s",by:"定时",time:"09-03 08:00"},
+];
+
+/* ---- utils ---- */
+const $=s=>document.querySelector(s),$$=s=>document.querySelectorAll(s);
+const esc=s=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("on");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("on"),1800)}
+function closeM(id){$("#"+id).classList.remove("on")}
+function closeD(){$$(".drawer").forEach(d=>d.classList.remove("on"))}
+function pass(r){const t=r.p+r.f,p=Math.round(r.p/t*100);
+  return `<span class="pass"><span class="track"><i class="${r.f?"bad":""}" style="width:${p}%"></i></span><span class="pct">${r.p}/${t} · ${p}%</span></span>`}
+
+/* ---- nav ---- */
+const names={dash:"工作台",projects:"项目",envs:"环境",cases:"用例",plans:"测试计划",runs:"执行记录",crons:"定时任务"};
+function go(p){
+  $$(".nav .it").forEach(i=>i.classList.toggle("on",i.dataset.p===p));
+  $$(".page").forEach(x=>x.classList.remove("on"));$("#p-"+p).classList.add("on");
+  $("#crumb").innerHTML=names[p];window.scrollTo(0,0)}
+$$(".nav .it").forEach(i=>i.addEventListener("click",()=>go(i.dataset.p)));
+
+/* ---- render ---- */
+function renderRuns(){
+  const html=runs.map(r=>`<tr><td class="mono">${r.id}</td><td>${esc(r.src)}</td><td>${esc(r.env)}</td>
+   <td>${pass(r.res)}</td><td class="mono">${r.t}</td><td class="muted">${esc(r.by)}</td><td class="mono muted">${r.time}</td>
+   <td><a onclick="openReport('${r.id}')">报告</a></td></tr>`).join("");
+  $("#dashRuns").innerHTML=html;$("#runList").innerHTML=html}
+
+function renderProjs(q=""){
+  const list=projects.filter(p=>p.name.includes(q));
+  $("#projCnt").textContent=list.length+" 个项目";
+  $("#projList").innerHTML=list.map(p=>`<tr><td><b>${esc(p.name)}</b></td><td class="muted">${esc(p.desc)}</td>
+   <td class="mono">${p.cases}</td><td>${esc(p.owner)}</td><td class="mono muted">${p.created}</td>
+   <td style="text-align:right"><a onclick="openProj(${p.id})">编辑</a> &nbsp;·&nbsp; <a style="color:var(--err)" onclick="delProj(${p.id})">删除</a></td></tr>`).join("")
+   ||`<tr><td colspan="6" class="empty">无匹配项目</td></tr>`}
+
+function renderEnvs(){$("#envList").innerHTML=envs.map(e=>{
+  const v=Object.keys(e.vars).map(k=>`<span class="chip">${esc(k)}</span>`).join("")||`<span class="faint">—</span>`;
+  return `<tr><td><b>${esc(e.name)}</b></td><td class="mono">${esc(e.url)}</td><td>${v}</td>
+   <td style="text-align:right"><a onclick="openEnv(${e.id})">编辑</a> &nbsp;·&nbsp; <a onclick="toast('演示：已复制环境')">复制</a></td></tr>`}).join("")}
+
+function renderCaseSel(){
+  const cur=$("#caseProj").value;
+  $("#caseProj").innerHTML=`<option value="">全部项目</option>`+projects.map(p=>`<option ${p.name===cur?"selected":""}>${esc(p.name)}</option>`).join("");
+  $("#fCaseProj").innerHTML=projects.map(p=>`<option>${esc(p.name)}</option>`).join("")}
+
+function renderCases(){
+  const pr=$("#caseProj").value,ty=$("#caseType").value,q=$("#caseSearch").value.trim();
+  const list=cases.filter(c=>(!pr||c.proj===pr)&&(!ty||c.type===ty)&&c.name.includes(q));
+  $("#caseCnt").textContent=list.length+" 条";
+  $("#caseList").innerHTML=list.map(c=>{
+    const lt=c.last==="pass"?`<span class="st ok">通过</span>`:c.last==="fail"?`<span class="st err">失败</span>`:`<span class="st off">未执行</span>`;
+    return `<tr><td><b>${esc(c.name)}</b></td><td class="muted">${esc(c.proj)}</td>
+     <td><span class="${c.type==="API"?"tag-api":"tag-ui"}">${c.type}</span></td>
+     <td class="mono">${c.steps}</td><td>${lt}</td><td class="mono muted">${c.updated}</td>
+     <td style="text-align:right"><a onclick="openCase(${c.id})">编辑</a> &nbsp;·&nbsp; <a onclick="openRun(${c.id})">执行</a></td></tr>`}).join("")
+    ||`<tr><td colspan="7" class="empty">无匹配用例</td></tr>`}
+
+function renderPlans(){$("#planList").innerHTML=plans.map(p=>`
+  <tr><td><b>${esc(p.name)}</b></td><td class="muted">${esc(p.scope)}</td><td>${esc(p.env)}</td>
+  <td>${p.git?`<span class="st run">Git 触发</span> <span class="faint">${esc(p.git)}</span>`:(p.on?esc(p.cronTxt):'<span class="muted">手动</span>')}</td>
+  <td>${p.on?`<span class="st ok">启用</span>`:`<span class="st off">停用</span>`}</td>
+  <td style="text-align:right"><a onclick="openRunPlan('${esc(p.name)}')">执行</a> &nbsp;·&nbsp; <a onclick="toast('演示：编辑计划')">编辑</a></td></tr>`).join("")}
+
+function renderCrons(){$("#cronList").innerHTML=plans.filter(p=>p.git||p.cron!=="—").map(p=>`
+  <tr><td><b>${esc(p.name)}</b></td><td>${p.git?'Git 合并时自动执行':esc(p.cronTxt)}</td>
+  <td class="muted">${p.next}</td>
+  <td>${p.on?`<span class="st ok">启用</span>`:`<span class="st off">停用</span>`}</td>
+  <td>${p.last==="ok"?`<span class="st ok">通过</span>`:p.last==="err"?`<span class="st err">失败 1</span>`:"—"}</td>
+  <td style="text-align:right"><a onclick="toggleCron(${plans.indexOf(p)})">${p.on?"停用":"启用"}</a> &nbsp;·&nbsp; <a onclick="toast('演示：已手动触发一次')">立即执行一次</a></td></tr>`).join("")}
+function toggleCron(i){plans[i].on=!plans[i].on;renderCrons();renderPlans();toast(plans[i].on?"已启用":"已停用")}
+
+/* ---- project / env ---- */
+let editProj=null;
+function openProj(id){editProj=id||null;
+  $("#projTitle").textContent=id?"编辑项目":"新建项目";
+  const p=projects.find(x=>x.id===id)||{};
+  $("#fProjName").value=p.name||"";$("#fProjDesc").value=p.desc||"";$("#fProjOwner").value=p.owner||"";
+  $("#mProj").classList.add("on")}
+function saveProj(){
+  const n=$("#fProjName").value.trim();if(!n)return toast("请填写项目名称");
+  if(editProj)Object.assign(projects.find(x=>x.id===editProj),{name:n,desc:$("#fProjDesc").value,owner:$("#fProjOwner").value||"—"});
+  else projects.push({id:Date.now(),name:n,desc:$("#fProjDesc").value,owner:$("#fProjOwner").value||"张伟",created:"09-04",cases:0});
+  renderProjs();renderCaseSel();closeM("mProj");toast("已保存")}
+function delProj(id){const i=projects.findIndex(x=>x.id===id);const n=projects[i].name;projects.splice(i,1);
+  renderProjs();renderCaseSel();toast("已删除 "+n)}
+
+function openEnv(id){const e=envs.find(x=>x.id===id)||{};
+  $("#fEnvName").value=e.name||"";$("#fEnvUrl").value=e.url||"";
+  $("#fEnvVars").value=e.vars?Object.entries(e.vars).map(([k,v])=>k+"="+v).join("\n"):"";
+  $("#mEnv").classList.add("on")}
+function saveEnv(){
+  const n=$("#fEnvName").value.trim();if(!n)return toast("请填写环境名称");
+  const vars={};$("#fEnvVars").value.split("\n").filter(l=>l.includes("=")).forEach(l=>{const[k,...v]=l.split("=");vars[k.trim()]=v.join("=").trim()});
+  envs.push({id:Date.now(),name:n,url:$("#fEnvUrl").value||"—",vars});
+  renderEnvs();closeM("mEnv");toast("已保存")}
+
+/* ---- case editor ---- */
+let editCase=null;
+function openCase(id){editCase=id||null;
+  const c=cases.find(x=>x.id===id);
+  $("#dCaseTitle").textContent=c?"编辑用例":"新建用例";
+  $("#fCaseName").value=c?c.name:"";if(c)$("#fCaseProj").value=c.proj;
+  $("#fCaseType").value=c?c.type:"API";
+  $("#steps").innerHTML="";
+  (c&&c.detail.length?c.detail:[{m:"GET",url:"/api/"}]).forEach(addStep);
+  $("#dCase").classList.add("on")}
+
+const CHECKS=[["code200","状态码是 200（请求成功）"],["contains","返回内容包含…"],["fieldEq","某个字段的值等于…"],["notEmpty","返回了数据（不为空）"]];
+function friendlyAssert(a){ if(!a) return "状态码是 200";
+  if(a.startsWith("status")) return "状态码是 200";
+  if(a.includes("包含")||a.includes("contains")) return "返回内容包含…";
+  if(a.includes("length")) return "返回了数据（不为空）";
+  return "某个字段的值等于…"}
+function addStep(s={}){
+  const d=document.createElement("div");d.className="step open";
+  d.innerHTML=`
+  <div class="hd" onclick="this.parentElement.classList.toggle('open');event.stopPropagation()">
+    <span class="idx">步骤</span><span class="m">${s.m||"GET"}</span><span class="u">${esc(s.url||"/api/")}</span>
+    <span class="as">检查：${esc(s.assertTxt||friendlyAssert(s.assert))}</span>
+    <button class="del" onclick="event.stopPropagation();this.closest('.step').remove()">删除</button>
+  </div>
+  <div class="bd">
+    <div class="fld"><label>接口地址</label>
+      <div class="reqline" style="margin-bottom:0">
+        <select class="s-m">${["GET","POST","PUT","DELETE"].map(m=>`<option ${m===(s.m||"GET")?"selected":""}>${m}</option>`).join("")}</select>
+        <input class="s-url mono" placeholder="/api/users/list" value="${esc(s.url)}">
+        <button class="btn sm" onclick="trySend(this)">试一下</button>
+      </div>
+      <div class="faint" style="font-size:12.5px;margin-top:5px">只填路径即可，域名由所选环境自动补上</div>
+    </div>
+    <div class="two">
+      <div class="fld"><label>检查 · 满足什么算通过</label>
+        <select class="s-check">${CHECKS.map(c=>`<option value="${c[0]}" ${c[1]===friendlyAssert(s.assert)?"selected":""}>${c[1]}</option>`).join("")}</select></div>
+      <div class="fld"><label>期望值 <span class="faint">（选「包含 / 等于」时填写）</span></label>
+        <input class="s-expect" placeholder="如：登录成功 或 0" value="${esc(s.expect||"")}"></div>
+    </div>
+    <div class="fld"><label>记住返回值 <span class="faint">（可选，后面的步骤会自动使用）</span></label>
+      <div class="two" style="margin-bottom:0">
+        <input class="s-saveName" placeholder="保存名字，如：token" value="${esc((s.extract||"").split("=")[0]||"")}">
+        <input class="s-savePath mono" placeholder="取自返回里的字段，如：data.token" value="${esc((s.extract||"").split("=")[1]||"")}">
+      </div>
+    </div>
+    <div class="adv">
+      <span class="tg" onclick="this.parentElement.classList.toggle('open')"><span class="arr">▶</span>高级选项（请求头、请求体）</span>
+      <div class="bd2">
+        <div class="fld"><label>请求头 · 每行一条，如 Authorization: Bearer \${token}</label>
+          <textarea class="s-hdr mono" rows="2" placeholder="默认不需要填">${esc(s.hdr)}</textarea></div>
+        <div class="fld" style="margin-bottom:0"><label>提交的数据 · JSON</label>
+          <textarea class="s-body mono" rows="3" placeholder='{"username": "\${username}"}'>${esc(s.body)}</textarea></div>
+      </div>
+    </div>
+  </div>`;
+  $("#steps").appendChild(d);renum()}
+function renum(){$$("#steps .step").forEach((s,i)=>s.querySelector(".idx").textContent=i+1)}
+
+function trySend(b){b.disabled=true;b.textContent="请求中…";
+  setTimeout(()=>{b.disabled=false;b.textContent="试一下";
+    toast("演示：真实请求需后端支持 → "+b.closest(".step").querySelector(".s-url").value)},600)}
+
+function saveCase(){
+  const n=$("#fCaseName").value.trim();if(!n)return toast("请填写用例名称");
+  const st=$$("#steps .step").map(s=>{
+    const checkSel=s.querySelector(".s-check"),checkTxt=checkSel.options[checkSel.selectedIndex].text;
+    const saveName=s.querySelector(".s-saveName").value.trim(),savePath=s.querySelector(".s-savePath").value.trim();
+    return {m:s.querySelector(".s-m").value,url:s.querySelector(".s-url").value,
+      hdr:s.querySelector(".s-hdr").value,body:s.querySelector(".s-body").value,
+      extract:saveName&&savePath?saveName+"="+savePath:"",
+      assert:checkTxt,expect:s.querySelector(".s-expect").value,assertTxt:checkTxt}});
+  if(editCase)Object.assign(cases.find(x=>x.id===editCase),{name:n,proj:$("#fCaseProj").value,type:$("#fCaseType").value,steps:st.length,updated:"09-04",detail:st});
+  else cases.push({id:Date.now(),name:n,proj:$("#fCaseProj").value,type:$("#fCaseType").value,steps:st.length,last:"-",updated:"09-04",detail:st});
+  renderCases();closeD();toast("已保存")}
+
+/* ---- run ---- */
+function openRun(id){const c=cases.find(x=>x.id===id);openRunExec(c.name,c)}
+function openRunPlan(name){openRunExec("计划 · "+name,null)}
+function openRunExec(title,c){
+  $("#dRunTitle").textContent="执行 · "+title;$("#dRunTitle").dataset.caseId=c?c.id:"";
+  $("#runEnv").innerHTML=envs.map(e=>`<option>${esc(e.name)}</option>`).join("");
+  $("#term").style.display="none";$("#term").innerHTML="";$("#runResult").innerHTML="";
+  $("#runBtn").disabled=false;$("#runBtn").textContent="立即执行";
+  $("#dRun").classList.add("on")}
+
+const logOk=[
+ ["dim","开始执行「登录并获取用户信息」 · 环境：测试"],
+ ["i","第 1 步 · 请求登录接口 POST /api/login"],
+ ["ok","      ✓ 成功（耗时 0.13s）· 检查点：状态码是 200 → 通过"],
+ ["ok","      ✓ 已记住返回值 token，后面的步骤会自动使用"],
+ ["i","第 2 步 · 获取用户信息 GET /api/user/info"],
+ ["ok","      ✓ 成功（耗时 0.05s）· 检查点：字段 code 等于 0 → 通过"],
+ ["i","第 3 步 · 查询订单列表 GET /api/user/orders?page=1"],
+ ["ok","      ✓ 成功（耗时 0.06s）· 检查点：返回了数据 → 通过"],
+ ["ok","测试完成：3 步全部通过，总耗时 0.9s"],
+];
+const logFail=[
+ ["dim","开始执行「库存扣减并发校验」 · 环境：测试"],
+ ["i","第 1 步 · 请求登录接口 POST /api/login"],
+ ["ok","      ✓ 成功（耗时 0.13s）· 检查点：状态码是 200 → 通过"],
+ ["i","第 2 步 · 并发扣减库存 POST /api/stock/deduct ×10"],
+ ["err","      ✗ 未通过 · 检查点：字段 remain 应等于 0，实际是 3"],
+ ["err","      可能的原因：并发扣减存在超卖，建议转给开发排查"],
+ ["err","测试完成：1 步通过，1 步失败，总耗时 4.1s"],
+];
+function doRun(){
+  const b=$("#runBtn");b.disabled=true;b.innerHTML='<span class="spin"></span>执行中';
+  const t=$("#term");t.style.display="block";t.innerHTML="";$("#runResult").innerHTML="";
+  const fail=$("#dRunTitle").textContent.includes("库存");
+  const log=fail?logFail:logOk;let i=0;
+  const iv=setInterval(()=>{
+    if(i>=log.length){clearInterval(iv);b.disabled=false;b.textContent="再次执行";
+      const f=log.some(l=>l[0]==="err");
+      $("#runResult").innerHTML=`<div class="panel" style="margin-top:14px">
+        <div class="bar"><h3 style="font-size:13px">结果 · ${f?'<span class="st err">有一步没通过</span>':'<span class="st ok">全部通过</span>'}</h3>
+        <a onclick="openReport('R-demo')">完整报告 →</a></div>
+        ${pass(f?{p:1,f:1}:{p:3,f:0})}
+        <div class="muted" style="margin-top:8px;font-size:13px">${f?"第 2 步检查点未通过：字段 remain 应该是 0，实际是 3。可以一键把这个问题转给开发处理。":"所有检查点都通过了，可以把这个用例加入定时计划。"}</div></div>`;
+      return}
+    const[k,m]=log[i++];const cls={i:"i",ok:"ok",err:"err",dim:"dim"}[k];
+    t.innerHTML+=`<div class="${cls}">${m}</div>`;t.scrollTop=t.scrollHeight},360)}
+
+/* ---- report ---- */
+function openReport(id){
+  $("#dRepTitle").textContent="执行报告 · "+id;
+  $("#dRepBody").innerHTML=`
+   <div style="display:flex;gap:26px;margin-bottom:14px;font-size:13.5px">
+     <div><div class="muted" style="font-size:13.5px">来源</div><b>计划 · 商城中台冒烟</b></div>
+     <div><div class="muted" style="font-size:13.5px">环境</div><b>测试</b></div>
+     <div><div class="muted" style="font-size:13.5px">触发</div><b>定时 08:00</b></div>
+     <div><div class="muted" style="font-size:13.5px">总耗时</div><b class="mono">6.2s</b></div>
+   </div>
+   <div style="margin-bottom:14px">${pass({p:6,f:0})} <span class="st ok" style="margin-left:8px">全部通过</span></div>
+   <table>
+     <thead><tr><th>#</th><th>用例</th><th>检查点</th><th>耗时</th><th>结果</th></tr></thead>
+     <tbody>
+      <tr><td class="mono">1</td><td>登录并获取用户信息</td><td class="mono muted">4/4</td><td class="mono">0.9s</td><td><span class="st ok">通过</span></td></tr>
+      <tr><td class="mono">2</td><td>创建订单 → 取消订单</td><td class="mono muted">6/6</td><td class="mono">1.2s</td><td><span class="st ok">通过</span></td></tr>
+      <tr><td class="mono">3</td><td>商品搜索分页</td><td class="mono muted">3/3</td><td class="mono">0.7s</td><td><span class="st ok">通过</span></td></tr>
+      <tr><td colspan="5" class="faint" style="text-align:center;padding:14px">其余 3 条用例均通过</td></tr>
+     </tbody>
+   </table>
+   <div class="panel" style="margin-top:14px;background:#fcfcfd">
+     <h3 style="font-size:13.5px;margin-bottom:8px">失败详情 · 示例取自 R-127</h3>
+     <div class="muted" style="font-size:13.5px;margin-bottom:6px">支付网关回归 · 第 2 步 POST /api/pay/create</div>
+     <pre class="resp">接口返回  { "code": 4001, "msg": "签名校验失败" }
+检查点    字段 code 应等于 0  →  实际是 4001  ✗</pre>
+   </div>
+   <div style="margin-top:14px;display:flex;gap:8px">
+     <button class="btn" onclick="toast('演示：导出 HTML 报告')">导出报告</button>
+     <button class="btn" onclick="toast('演示：推送 Webhook 通知')">推送通知</button>
+   </div>`;
+  $("#dReport").classList.add("on")}
+
+/* ---- AI 从提交生成 ---- */
+const commits=[
+  {sha:"a3f9c21",msg:"feat: 新增退款接口 /api/refund/create",by:"李娜",time:"09-04 10:12",sel:true},
+  {sha:"7b2e08d",msg:"fix: 优惠券金额计算错误 (#88)",by:"王强",time:"09-04 09:40",sel:true},
+  {sha:"c41d5f7",msg:"chore: 升级依赖，调整 CI 脚本",by:"张伟",time:"09-03 18:05",sel:false},
+];
+function openAi(){
+  $("#aiCommits").innerHTML=commits.map((c,i)=>`
+   <label style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:7px;margin-bottom:7px;cursor:pointer">
+     <input type="checkbox" ${c.sel?"checked":""} onchange="commits[${i}].sel=this.checked" style="width:auto">
+     <div style="flex:1;min-width:0">
+       <div style="font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(c.msg)}</div>
+       <div class="faint" style="font-size:12px;margin-top:2px"><span class="mono">${c.sha}</span> · ${esc(c.by)} · ${c.time}</div>
+     </div>
+   </label>`).join("");
+  $("#aiResult").innerHTML="";
+  $("#dAi").classList.add("on")}
+
+function doAi(){
+  const sel=commits.filter(c=>c.sel);
+  if(!sel.length)return toast("请先选择要分析的提交");
+  const b=$("#aiBtn");b.disabled=true;b.innerHTML='<span class="spin"></span>AI 正在分析 '+(sel.length)+" 个提交…";
+  $("#aiResult").innerHTML="";
+  setTimeout(()=>{
+    b.disabled=false;b.textContent="重新分析";
+    $("#aiResult").innerHTML=`
+    <div class="panel" style="margin-top:16px;margin-bottom:0">
+      <div class="bar"><h3 style="font-size:13.5px">分析结果 · 发现 2 个受影响的接口</h3><span class="st ok">AI · 草稿</span></div>
+      <div class="fld" style="border:1px solid var(--line);border-radius:7px;padding:12px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span class="mono" style="font-size:13px;color:var(--acc)">POST /api/refund/create</span>
+          <span class="faint" style="font-size:12px">新接口 · 尚无用例</span>
+        </div>
+        <div class="muted" style="font-size:13px;line-height:1.9">草稿用例：<b>创建退款订单</b> · 2 步
+          <br>① POST /api/refund/create（提交订单号和金额）→ 检查：状态码是 200
+          <br>② 检查：字段 code 等于 0</div>
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button class="btn sm pri" onclick="acceptAi('创建退款订单')">保存为用例</button>
+          <button class="btn sm" onclick="toast('演示：可在编辑器里修改后再保存')">先去修改</button>
+          <button class="btn sm" onclick="toast('已丢弃该草稿')">丢弃</button>
+        </div>
+      </div>
+      <div class="fld" style="border:1px solid var(--line);border-radius:7px;padding:12px;margin-bottom:0">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span class="mono" style="font-size:13px;color:var(--acc)">GET /api/coupon/amount</span>
+          <span class="faint" style="font-size:12px">已有用例「优惠券计算校验」覆盖</span>
+        </div>
+        <div class="muted" style="font-size:13px">该接口被本次 fix 修改，建议立即执行已有用例验证修复效果。</div>
+        <div style="margin-top:10px"><button class="btn sm" onclick="closeD();openRunExec('优惠券计算校验',null)">执行已有用例</button></div>
+      </div>
+      <div class="faint" style="font-size:12px;margin-top:10px">提交 c41d5f7（chore）未涉及接口，已跳过。代码内容默认不发送给 AI，仅分析提交说明与变更文件。</div>
+    </div>`},1600)}
+function acceptAi(name){
+  cases.push({id:Date.now(),name,proj:"商城中台",type:"API",steps:2,last:"-",updated:"09-04",
+    detail:[{m:"POST",url:"/api/refund/create",assert:"状态码是 200（请求成功）",assertTxt:"状态码是 200"},{m:"GET",url:"/api/coupon/amount",assert:"某个字段的值等于…",assertTxt:"字段 code 等于 0"}]});
+  renderCases();closeD();toast("已保存 AI 生成的用例「"+name+"」")}
+
+renderRuns();renderProjs();renderEnvs();renderCaseSel();renderCases();renderPlans();renderCrons();
+</script>
+</body>
+</html>

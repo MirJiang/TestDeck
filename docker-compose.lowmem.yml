@@ -1,0 +1,52 @@
+# 低配服务器部署：后端镜像不装 Chromium（省约 500MB 镜像体积与运行内存），
+# UI/AI 测试统一走 Lightpanda 容器（内存约为 Chromium 的 1/9，beta）。
+# 数据库使用 PostgreSQL（alpine 镜像，空闲内存很小）。
+# 启动前必须：cp .env.example .env，并确保 .env 内包含：
+#   TD_DATABASE_URL=postgresql+psycopg2://testdeck:testdeck@db:5432/testdeck
+#   TD_BROWSER_ENGINE=lightpanda
+#   TD_LIGHTPANDA_URL=http://lightpanda:9222
+# 用法：docker compose -f docker-compose.lowmem.yml up -d --build
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: testdeck
+      POSTGRES_PASSWORD: testdeck
+      POSTGRES_DB: testdeck
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U testdeck"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.lowmem
+    volumes:
+      - ./.env:/app/.env:ro        # 配置文件挂载
+    depends_on:
+      db:
+        condition: service_healthy
+      lightpanda:
+        condition: service_started
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  lightpanda:
+    image: ghcr.io/lightpanda-io/browser:latest
+    command: serve --host 0.0.0.0 --port 9222
+    restart: unless-stopped
+
+volumes:
+  pgdata:
