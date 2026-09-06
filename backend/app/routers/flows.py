@@ -123,6 +123,38 @@ def list_flow_runs(fid: str, db: Session = Depends(get_db), user: User = Depends
     return [_out(r, brief=True) for r in rows]
 
 
+# ---------- 截图基线（视觉回归） ----------
+
+def _baseline_files(fid: str):
+    from ..engine.ui_runner import STATIC_DIR
+    return sorted(STATIC_DIR.glob(f"base-{fid}-*.png"))
+
+
+@router.get("/{fid}/baselines")
+def list_baselines(fid: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    f = db.get(Flow, fid)
+    if not f:
+        raise HTTPException(404, "流程不存在")
+    check_project_access(f.project_id, user, db)
+    return [{"file": p.name, "url": f"/static/{p.name}"} for p in _baseline_files(fid)]
+
+
+@router.delete("/{fid}/baselines")
+def clear_baselines(fid: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """清除基线：改了流程步骤导致基线错位时用，下次成功执行会重新留存。"""
+    f = db.get(Flow, fid)
+    if not f:
+        raise HTTPException(404, "流程不存在")
+    check_project_access(f.project_id, user, db)
+    n = 0
+    for p in _baseline_files(fid):
+        try:
+            p.unlink(); n += 1
+        except OSError:
+            pass
+    return {"ok": True, "removed": n}
+
+
 @router.get("/runs/{rid}/detail")
 def flow_run_detail(rid: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     r = db.get(TestRun, rid)

@@ -110,6 +110,16 @@ async function del(f) {
   await api('/flows/' + f.id, { method: 'DELETE' }); load()
 }
 
+async function manageBaselines(f) {
+  const list = await api(`/flows/${f.id}/baselines`)
+  if (!list.length) { toast('该流程还没有截图基线（截图步骤首次成功执行后自动留存）'); return }
+  if (!await confirmDialog(
+    `流程「${f.name}」现有 ${list.length} 张截图基线。\n清除后下次成功执行会按新页面重新留存；改造流程步骤导致对比错位时用。`,
+    { danger: true, okText: '清除基线' })) return
+  const r = await api(`/flows/${f.id}/baselines`, { method: 'DELETE' })
+  toast(`已清除 ${r.removed} 张基线`)
+}
+
 const runEnv = ref('')
 const runLoading = ref(false)
 const result = ref(null)
@@ -201,7 +211,8 @@ function stepsFor(result) {
           <td class="mono">{{ f.steps }}</td>
           <td class="mono muted">{{ f.updated_at.slice(0, 10) }}</td>
           <td style="text-align:right"><a @click="run(f)">执行</a> · <a @click="openEdit(f.id)">编辑</a> ·
-            <a @click="openHistory(f)">记录</a> · <a style="color:var(--err)" @click="del(f)">删除</a></td>
+            <a @click="openHistory(f)">记录</a> · <a @click="manageBaselines(f)">基线</a> ·
+            <a style="color:var(--err)" @click="del(f)">删除</a></td>
         </tr>
         <tr v-if="!list.length"><td colspan="5" class="empty">
           {{ pid ? '暂无流程，点右上角新建；或参考内置的「询价单全流程」演示' : '请先创建项目' }}</td></tr>

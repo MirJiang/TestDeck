@@ -108,7 +108,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 
 ### 4.5 高级断言与视觉回归
 - **JSONPath 断言**：检查点类型选「JSONPath 断言（高级）」，字段写表达式（如 `$.data.list[*].id`）；期望值留空 = 匹配到任意值即通过，填值 = 任一匹配值等于它（弱类型）即通过。四类基础检查点（status/contains/field_eq/not_empty）之外的兜底能力。
-- **截图基线对比**：流程的「截图留档」步骤，首次通过自动留存基线（`static/base-{flow}-{步骤}.png`），之后每次执行与基线做像素比对，差异超过阈值（`TD_SHOT_DIFF_PCT`，默认 2%）判失败并生成「基线｜本次」并排对比图；`TD_SHOT_DIFF=0` 关闭。调整流程步骤顺序后基线对应关系会变化，重新跑一次成功执行即可刷新基线。
+- **截图基线对比**：流程的「截图留档」步骤，首次通过自动留存基线（`static/base-{flow}-{步骤}.png`），之后每次执行与基线做像素比对，差异超过阈值（`TD_SHOT_DIFF_PCT`，默认 2%）判失败并生成「基线｜本次」并排对比图；`TD_SHOT_DIFF=0` 关闭。调整流程步骤顺序后基线对应关系会变化：流程列表「基线」入口可查看/清除，或重新跑一次成功执行刷新。
 
 ### 4.6 调度与触发
 - 计划保存即同步 Schedule 表并重建 APScheduler 任务（`分 时 日 月 周`）。
@@ -181,7 +181,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 ## 9. 测试
 
 ```bash
-cd backend && .venv/Scripts/python -m pytest tests -q     # 75 个单元/接口测试
+cd backend && .venv/Scripts/python -m pytest tests -q     # 76 个单元/接口测试
 # E2E（需先起后端与 mock 被测系统 9001）：
 tests/e2e.py e2e_m2.py e2e_m3.py e2e_m5.py e2e_flow.py
 # 假 LLM 服务器（AI 引擎联调用）：uvicorn tests.fake_llm:app --port 9111

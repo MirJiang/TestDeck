@@ -76,8 +76,15 @@ def _save_side_by_side(base_path: Path, new_path: Path, out_path: Path):
 
 
 def run_flow(flow, env, run_id: str, timeout: float = 15.0,
-             on_step=None, cases: dict | None = None) -> dict:
-    """cases: {case_id: TestCase}，供 type=case 步骤内联执行（调用方预载）。"""
+             on_step=None, cases: dict | None = None, cancel_for: str = "") -> dict:
+    """cases: {case_id: TestCase}，供 type=case 步骤内联执行（调用方预载）。
+
+    cancel_for：父级执行记录 id（如计划执行时传计划 run id），
+    父级被取消时本流程也在步骤间提前终止。
+    """
+    def _cancelled() -> bool:
+        return is_cancelled(run_id) or (cancel_for and is_cancelled(cancel_for))
+
     base = (env.base_url or "").rstrip("/") if env else ""
     env_vars = dict(env.variables or {}) if env else {}
     roles = {r["key"]: r for r in (flow.roles or []) if r.get("key")}
@@ -226,7 +233,7 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
             """顺序执行一组同构步骤（api / ui），共用取消与计数。"""
             nonlocal ok_n, bad_n
             for j, st in enumerate(steps, 1):
-                if is_cancelled(run_id):
+                if _cancelled():
                     note_cancelled(j)
                     bad_n += 1
                     return
@@ -310,7 +317,7 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
 
     try:
         for i, step in enumerate(flow.steps or [], 1):
-            if is_cancelled(run_id):
+            if _cancelled():
                 detail.append({"idx": i, "role": step.get("role", ""), "type": step.get("type", ""),
                                "pass": False, "reason": "已取消", "ms": 0})
                 fail_n += 1

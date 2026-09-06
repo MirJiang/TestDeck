@@ -155,6 +155,7 @@ class EnhanceIn(BaseModel):
     steps: list[dict] = []     # 可视化录制产出的 UI 步骤
     url: str = ""              # 录制的起始地址（给模型上下文）
     name: str = ""             # 可选：已有用例名
+    context: str = ""          # 录制时的操作意图（如 AI 代劳的目标），帮助模型更有把握补断言
 
 
 @router.post("/enhance-steps")
@@ -171,11 +172,14 @@ async def enhance_steps(body: EnhanceIn, user: User = Depends(current_user)):
         '{"name":"建议的用例名","steps":[增强后的步骤数组],"note":"改动说明","vars":{"变量名":"原值"}}。'
         "要求：1) 保持原有动作的顺序与内容不变；"
         "2) 只在关键动作（提交/登录/保存等）之后插入 expect_text 断言，没把握就不要编造；"
+        "输入里的 context 描述了录制时的操作意图（如要登录到什么系统、期望出现什么提示），"
+        "是补断言的重要依据，有把握时就用它；"
         "3) fill 的 value 中像账号/密码/手机号/邮箱的值替换为 ${username} 这类变量，"
         "并在 vars 里给出原值；普通业务数据保持原样；"
         "4) 除插入断言与参数化外不要增删改任何步骤。只输出 JSON。"
     )
-    payload = json.dumps({"url": body.url, "steps": body.steps[:80]}, ensure_ascii=False)
+    payload = json.dumps({"url": body.url, "context": body.context, "steps": body.steps[:80]},
+                         ensure_ascii=False)
     out = await A.chat_json(sys_prompt, payload, kind="gen-text")
     if out and isinstance(out.get("steps"), list) and out["steps"]:
         return {"enhanced": True, "name": str(out.get("name") or body.name),

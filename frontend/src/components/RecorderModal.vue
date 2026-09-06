@@ -33,6 +33,7 @@ let finished = false
 const aiGoal = ref('')
 const aiEnvId = ref('')
 const aiRunning = ref(false)
+const aiGoals = []   // 本次录制中 AI 代劳的目标（录完增强时作为语境传给模型）
 const aiVars = computed(() =>
   (props.envs.find(e => e.id === aiEnvId.value) || props.envs[0] || {}).variables || {})
 
@@ -125,6 +126,7 @@ async function doAi() {
   const r = await cmd({ op: 'ai', goal: aiGoal.value.trim(), vars: aiVars.value, max_steps: 12 }, 300000)
   aiRunning.value = false
   if (r.ok) {
+    aiGoals.push(aiGoal.value.trim())
     aiGoal.value = ''
     stepN.value += r.ai_steps || 0
   } else {
@@ -147,7 +149,8 @@ async function doEnhance() {
   enhancing.value = true; errMsg.value = ''
   try {
     enh.value = await api('/ai/enhance-steps',
-      { method: 'POST', body: { steps: rawSteps.value, url: url.value } }, { timeout: 180000 })
+      { method: 'POST', body: { steps: rawSteps.value, url: url.value, context: aiGoals.join('；') } },
+      { timeout: 180000 })
   } catch (e) { errMsg.value = e.message } finally { enhancing.value = false }
 }
 

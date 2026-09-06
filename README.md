@@ -1,5 +1,7 @@
 # TestDeck · 自动化测试平台
 
+[![CI](https://github.com/MirJiang/TestDeck/actions/workflows/ci.yml/badge.svg)](https://github.com/MirJiang/TestDeck/actions/workflows/ci.yml)
+
 **让不会写代码的同事也能做测试，让 AI 替你点完整个流程。**
 
 TestDeck 是一个面向团队内部的开源测试平台：填表式创建 API / UI 测试，浏览器操作录一遍自动出用例；

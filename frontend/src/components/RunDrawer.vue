@@ -85,6 +85,10 @@ async function cancel() {
 // 结果展示：单用例 detail 是步骤数组，计划 detail 是用例数组
 const steps = computed(() => result.value ? (result.value.case_id ? result.value.detail : null) : null)
 const casesOfPlan = computed(() => result.value ? (result.value.plan_id ? result.value.detail : null) : null)
+
+// 计划条目展开：点一行看该用例/流程内部的步骤明细
+const expandedItem = ref(-1)
+function toggleItem(i) { expandedItem.value = expandedItem.value === i ? -1 : i }
 </script>
 
 <template>
@@ -141,11 +145,25 @@ const casesOfPlan = computed(() => result.value ? (result.value.plan_id ? result
         <table v-if="casesOfPlan">
           <thead><tr><th>条目</th><th>结果</th><th>明细</th></tr></thead>
           <tbody>
-            <tr v-for="(c, i) in casesOfPlan" :key="c.case_id || c.flow_id || i">
-              <td><span class="chip">{{ c.flow_id ? '流程' : '用例' }}</span> {{ c.name }}</td>
-              <td><span :class="c.pass ? 'st ok' : 'st err'">{{ c.pass ? '通过' : '失败' }}</span></td>
-              <td class="mono muted">{{ c.pass_n }}/{{ c.pass_n + c.fail_n }} 检查点</td>
-            </tr>
+            <template v-for="(c, i) in casesOfPlan" :key="c.case_id || c.flow_id || i">
+              <tr style="cursor:pointer" @click="toggleItem(i)">
+                <td><span class="chip">{{ c.flow_id ? '流程' : '用例' }}</span> {{ c.name }}
+                  <span class="faint" style="font-size:11px">{{ expandedItem === i ? '▴' : '▾' }}</span></td>
+                <td><span :class="c.pass ? 'st ok' : 'st err'">{{ c.pass ? '通过' : '失败' }}</span></td>
+                <td class="mono muted">{{ c.pass_n }}/{{ c.pass_n + c.fail_n }} 检查点</td>
+              </tr>
+              <tr v-if="expandedItem === i">
+                <td colspan="3" style="background:#fafbfc;padding:6px 16px 10px">
+                  <div v-for="(s, j) in (c.detail || [])" :key="j"
+                    style="display:flex;gap:8px;align-items:baseline;font-size:12.5px;padding:2px 0">
+                    <span :style="{ color: s.pass ? 'var(--ok)' : 'var(--err)' }">{{ s.pass ? '✓' : '✗' }}</span>
+                    <span class="mono" style="word-break:break-all">{{ s.m || s.action || s.type }} {{ s.url || s.target || '' }}</span>
+                    <span class="faint" style="font-size:12px">{{ s.reason }}</span>
+                  </div>
+                  <div v-if="!(c.detail || []).length" class="faint" style="font-size:12px">该条目没有步骤明细</div>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>

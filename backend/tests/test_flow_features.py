@@ -144,3 +144,24 @@ def test_regression_advice_includes_flows():
                 headers=H)
     advice = client.get("/api/v1/ai/regression-advice", headers=H).json()
     assert any(f["flow_name"] == "老流程" for f in advice["stale_flows"])
+
+
+def test_baseline_manage_endpoints():
+    """截图基线的查看与清除（视觉回归管理入口）。"""
+    from PIL import Image
+    from app.engine.ui_runner import STATIC_DIR
+    STATIC_DIR.mkdir(exist_ok=True)
+    client = make_client()
+    H = {"Authorization": "Bearer " + login(client, "admin", "admin123")}
+    pid = client.post("/api/v1/projects", json={"name": "P"}, headers=H).json()["id"]
+    fid = client.post("/api/v1/flows",
+                      json={"project_id": pid, "name": "F",
+                            "roles": [{"key": "u", "name": "u", "variables": {}}], "steps": []},
+                      headers=H).json()["id"]
+    for tag in ("s1", "s5"):
+        Image.new("RGB", (10, 10), (255, 255, 255)).save(STATIC_DIR / f"base-{fid}-{tag}.png")
+    lst = client.get(f"/api/v1/flows/{fid}/baselines", headers=H).json()
+    assert len(lst) == 2 and all(item["url"].startswith("/static/") for item in lst)
+    r = client.delete(f"/api/v1/flows/{fid}/baselines", headers=H).json()
+    assert r["ok"] and r["removed"] == 2
+    assert client.get(f"/api/v1/flows/{fid}/baselines", headers=H).json() == []

@@ -82,7 +82,8 @@ def execute_plan(plan: TestPlan, env: Env, trigger_by: str = "cron") -> TestRun:
             db.add(sub); db.commit()
             cases = {c.id: c for c in db.query(TestCase).filter(TestCase.project_id == f.project_id)}
             r = run_flow(f, env, sub.id,
-                         on_step=lambda d, _sid=sub.id: _push_run_detail(_sid, d), cases=cases)
+                         on_step=lambda d, _sid=sub.id: _push_run_detail(_sid, d),
+                         cases=cases, cancel_for=run.id)   # 取消计划也能中断进行中的流程
             sub.status, sub.pass_n, sub.fail_n = r["status"], r["pass_n"], r["fail_n"]
             sub.duration, sub.detail = r["duration"], r["detail"]
             total_p += r["pass_n"]; total_f += r["fail_n"]
