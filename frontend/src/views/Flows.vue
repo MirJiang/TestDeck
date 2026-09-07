@@ -54,7 +54,7 @@ function addStep(type) {
   const role = editing.value.roles[0]?.key || ''
   const tpl = {
     ui: { role, type: 'ui', action: 'goto', url: '', selector: '', value: '' },
-    ai: { role, type: 'ai', goal: '', url: '', max_steps: 15 },
+    ai: { role, type: 'ai', goal: '', url: '', max_steps: 15, retries: 1 },
     case: { role, type: 'case', case_id: '' },
     api: { role, type: 'api', m: 'POST', url: '', headers: '', body: '',
            check: { type: 'status', expect: '200', field: '' }, save: { name: '', from: '' } },
@@ -341,6 +341,8 @@ function stepsFor(result) {
               <input v-model="s.value" placeholder="报价成功"></div>
             <div class="fld" v-if="s.action === 'ai'"><label>AI 要完成的目标（大白话，可引用 $&#123;变量&#125;）</label>
               <input v-model="s.value" placeholder="用 $&#123;username&#125; 登录并完成滑块验证码，进入首页为止"></div>
+            <div class="fld" v-if="s.action === 'ai'"><label>失败自动重试（次，0-3）</label>
+              <input v-model.number="s.retries" type="number" min="0" max="3" placeholder="1"></div>
           </template>
 
           <template v-if="s.type === 'api'">
@@ -423,6 +425,10 @@ function stepsFor(result) {
         </div>
         <FlowDiagram v-if="running.roles?.length" :roles="running.roles" :steps="stepsFor(result)" :detail="result.detail" />
         <div v-else class="muted">该流程的角色定义缺失，请重新编辑保存后执行。</div>
+        <div v-for="(d, i) in (result.detail || []).filter(x => x.video)" :key="'vid' + i" style="margin-top:10px">
+          <div class="muted" style="font-size:12.5px;margin-bottom:4px">🎬 {{ d.target }}</div>
+          <video :src="d.video" controls style="max-width:100%;border:1px solid var(--line);border-radius:7px"></video>
+        </div>
       </template>
     </div>
   </div>

@@ -377,6 +377,24 @@ def _exec_action(page, act: dict, variables: dict):
     return False, f"不支持的动作：{op}", None
 
 
+_FAST_MODEL_MARKS = ("flash", "turbo", "lite", "mini", "air", "instant", "speed", "haiku")
+
+
+def _model_hint() -> str:
+    """失败时的模型分档建议：验证码/复杂定位等高难度场景对模型能力敏感。"""
+    try:
+        model = A.current_model()
+        if not model:
+            return ""
+        if not A.vision_enabled():
+            return "当前未开启视觉（截图辅助）——验证码、复杂页面建议在「模型配置」勾选支持视觉"
+        if any(m in model.lower() for m in _FAST_MODEL_MARKS):
+            return f"当前模型 {model} 为快速档，验证码等高难度场景建议在「模型配置」切换更强档模型"
+    except Exception:
+        pass
+    return ""
+
+
 def ai_drive(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEPS,
              run_id: str = "", shot_tag: str = "ai", on_step=None, engine: str = "") -> dict:
     """同步驱动：返回 {status, pass_n, fail_n, detail, saved, summary}。须在执行队列线程调用。
@@ -499,6 +517,10 @@ def ai_drive(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEP
 
     if not summary:
         summary = "执行结束"
+    if fail_n and summary != "用户取消":
+        hint = _model_hint()
+        if hint:
+            summary += f"；建议：{hint}"
     return {"status": "failed" if fail_n else "passed", "pass_n": pass_n, "fail_n": fail_n,
             "duration": round(time.time() - t0, 2), "detail": detail, "saved": saved, "summary": summary}
 
@@ -549,6 +571,8 @@ def run_ai_case(case, env, run_id: str, on_step=None) -> dict:
                     "saved": {}, "summary": "浏览器引擎不可用"}
         ctx = browser.new_context(viewport={"width": 1280, "height": 800})
         page = ctx.new_page()
+        from .ui_runner import start_run_video, finish_run_video
+        video_url = start_run_video(page, run_id)
         note_entry = None
         if note:  # 引擎回退等信息带进结果，用户在执行明细里能看到
             note_entry = {"idx": 1, "action": "note", "target": note, "pass": True,
@@ -556,10 +580,11 @@ def run_ai_case(case, env, run_id: str, on_step=None) -> dict:
         try:
             page.goto(start, timeout=25000)
         except Exception as e:
-            browser.close()
             detail = ([note_entry] if note_entry else []) + [
                 {"idx": 2 if note_entry else 1, "action": "goto", "target": start, "pass": False,
                  "reason": f"打开起始页失败：{type(e).__name__}: {e}"[:200], "ms": 0}]
+            finish_run_video(page, video_url, detail)
+            browser.close()
             return {"status": "failed", "pass_n": 0, "fail_n": len(detail),
                     "duration": round(time.time() - t0, 2), "detail": detail,
                     "saved": {}, "summary": "起始页打开失败"}
@@ -574,5 +599,6 @@ def run_ai_case(case, env, run_id: str, on_step=None) -> dict:
         if detail:  # 把 note 并进结果明细头部（idx 保持 ai_drive 的编号可读性）
             r["detail"] = detail + r["detail"]
             r["pass_n"] += 1
+        finish_run_video(page, video_url, r["detail"])
         browser.close()
     return r

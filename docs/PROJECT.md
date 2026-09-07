@@ -39,7 +39,7 @@ FastAPI 后端（uvicorn，单进程）
    │    ├─ ai_runner.py    AI 用例：页面状态(+截图) → 大模型决策 → 执行动作 循环
    │    ├─ ui_recorder.py  录制：remote 画面串流 / local 弹窗浏览器
    │    ├─ browser.py      引擎选择：Chromium Headless Shell / Lightpanda(CDP)
-   │    └─ queue.py        单工作线程串行队列（避免 SQLite 写锁，天然限流）
+   │    └─ queue.py        执行队列：TD_WORKERS 可配并发（默认 1 保持串行；SQLite 已配 busy_timeout）
    ├─ ai.py           LLM 适配（OpenAI 兼容，文本/视觉；未配置降级内置规则）
    ├─ scheduler.py    APScheduler cron 调度（时区 Asia/Shanghai）
    ├─ notify.py       钉钉/企微 webhook 告警
@@ -48,7 +48,7 @@ FastAPI 后端（uvicorn，单进程）
 
 关键设计决策：
 
-- **串行执行队列**：所有测试（用例/计划/流程）提交到同一个单工作线程同步执行。避免并发写冲突，也杜绝跨线程事件循环问题；内部团队规模下单并发足够。
+- **执行队列（默认串行，可开并发）**：所有测试提交到同一个线程池，默认 1 个 worker 天然串行——避免并发写冲突，也杜绝跨线程事件循环问题。团队规模上来后 `.env` 设 `TD_WORKERS=N`（≤16）开启并发执行；SQLite 已配 `busy_timeout`，多 worker 写锁等待自动重试，生产建议切 PostgreSQL/MySQL。
 - **数据库可插拔**：SQLAlchemy 适配层，默认 SQLite（零配置，本地开发与测试）；生产设 `TD_DATABASE_URL` 一键切 PostgreSQL 或 MySQL（Docker 部署已内置 PostgreSQL 16，健康检查就绪后才启动后端）。`python -m app.cli.db_migrate --to <连接串>` 可把现有 SQLite 数据迁入。
 - **AI 决策循环**：`提取页面状态（可见元素/DOM 文本/可选截图）→ LLM 输出 JSON 动作 → 执行 → 回填历史`，直到模型输出 done、连续 3 次相同动作失败熔断、或达到最大步数。
 - **渐进式进度**：AI 用例每执行一步、计划每完成一条用例即增量写库；前端轮询渲染，无需长连接。
@@ -103,7 +103,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 
 ### 4.4 浏览器引擎
 - 默认 Chromium Headless Shell（Playwright 精简无头内核）。
-- 可选 Lightpanda（AI 原生轻量引擎，beta，内存约为 Chromium 的 1/9）：经 CDP 连接，支持自动拉起进程（`TD_LIGHTPANDA_BIN`）；不可用时自动回退 Chromium，回退信息写入执行明细。
+- 可选 Lightpanda（AI 原生轻量引擎，beta，内存约为 Chromium 的 1/9）：经 CDP 连接，支持自动拉起进程（`TD_LIGHTPANDA_BIN`）；不可用时自动回退 Chromium，回退信息写入执行明细。**能力自检降级**：执行录像（Screencast）与视觉截图在不支持的引擎上自动跳过、AI 退回纯文本决策，不影响执行；正式支持等上游补齐 Windows 构建与截图能力。
 - 低配部署：`docker-compose.lowmem.yml` 后端镜像不装 Chromium，统一走 Lightpanda 容器。
 
 ### 4.5 高级断言与视觉回归
@@ -118,9 +118,10 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 - admin 全可见；member 仅见自己创建或被加入的项目（`perms.check_project_access`）。
 - 模型配置、用户管理、通知渠道写操作仅 admin。
 
-## 5. 数据模型（14 表）
+## 5. 数据模型（15 表）
 
-`users` 账号 · `projects` 项目 · `project_members` 成员 · `envs` 环境 · `test_cases` 用例（api/ui/ai）·
+`users` 账号 · `projects` 项目 · `project_members` 成员 · `envs` 环境（一项目一条）· `project_users` **项目测试用户**（账号密码池，名称/账号/密码/备注）·
+`test_cases` 用例（api/ui/ai，含绑定的测试账号 `username/password`）·
 `test_plans` 计划（`case_ids` + `flow_ids`）· `schedules` cron 调度 ·
 `test_runs` **统一执行记录**（单用例 `case_id` / 单流程 `flow_id` / 整计划 `plan_id` 三种来源，流程历史也查此表）·
 `flows` 流程定义 ·
@@ -134,15 +135,15 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 | 分组 | 端点 |
 |---|---|
 | 认证 | `POST /auth/login` · `GET /auth/me` · `POST/GET /auth/users` · `PUT /auth/password` · `PUT /auth/users/{uid}/password` |
-| 项目 | `GET/POST /projects` · `PUT/DELETE /projects/{pid}` · `GET/POST /projects/{pid}/envs` · `PUT/DELETE .../envs/{eid}` · `GET/POST /projects/{pid}/members` · `DELETE .../members/{uid}` |
-| 用例 | `GET/POST /projects/{pid}/cases` · `GET/PUT/DELETE /cases/{cid}` |
+| 项目 | `GET/POST /projects` · `PUT/DELETE /projects/{pid}` · `GET/POST /projects/{pid}/envs`（一项目仅一条）· `PUT/DELETE .../envs/{eid}` · `GET/POST /projects/{pid}/users` · `PUT/DELETE .../users/{uid}` · `POST .../users/import` · `GET/POST /projects/{pid}/members` · `DELETE .../members/{uid}` |
+| 用例 | `GET/POST /projects/{pid}/cases` · `POST /projects/{pid}/cases/import-assets`（HAR/Postman）· `GET/PUT/DELETE /cases/{cid}` · `POST /cases/{cid}/copy` |
 | 执行 | `POST /runs/cases/{cid}/run` · `POST /runs/plans/{pid}/run` · `GET /runs` · `GET /runs/{rid}` · `GET /runs/{rid}/export` · `GET /runs/export.csv` |
 | 流程 | `GET/POST /flows` · `GET/PUT/DELETE /flows/{fid}` · `POST /flows/{fid}/run` · `GET /flows/{fid}/runs` · `GET /flows/runs/{rid}/detail` |
 | 计划 | `GET/POST /plans` · `PUT/DELETE /plans/{pid}` |
 | Git | `GET/POST /integrations/git/repos` · `DELETE .../repos/{rid}` · `GET /integrations/git/commits` · `POST /integrations/git/webhook/{secret}` |
 | AI | `POST /ai/gen-from-commits` · `POST /ai/gen-from-text` · `POST /ai/analyze-run/{rid}` · `GET /ai/usage` · `GET /ai/regression-advice` |
 | 设置 | `GET/POST /settings/notify` · `PUT/DELETE /settings/notify/{cid}` · `POST /settings/notify/{cid}/test` · `GET/POST /settings/llm` · `PUT/DELETE /settings/llm/{id}` · `POST /settings/llm/{id}/activate` · `POST /settings/llm/test` · `POST /settings/llm/models` |
-| 录制 | `POST /cases/ui-record/start` · `GET /cases/ui-record/{sid}/frame` · `POST /cases/ui-record/{sid}/cmd` · `GET /cases/ui-record/{sid}` |
+| 录制 | `POST /cases/ui-record/start` · `GET /cases/ui-record/{sid}/frame`（轮询兜底）· **`WS /cases/ui-record/{sid}/stream`**（Screencast 推流，`?token=` 鉴权）· `POST /cases/ui-record/{sid}/cmd` · `POST /cases/ui-record/{sid}/cancel-ai` · `GET /cases/ui-record/{sid}` |
 | 健康 | `GET /health` |
 
 ## 7. 配置参考
@@ -157,7 +158,8 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 | `TD_ADMIN_PASSWORD` | `admin123` | 初始 admin 密码，**生产必须修改** |
 | `TD_SEED_DEMO` | `1` | 是否预置询价单演示数据 |
 | `TD_NO_SCHEDULER` | 未设 | 设为 1 禁用调度（测试用） |
-| `TD_KEEP_DAYS` | `30` | 截图保留天数 |
+| `TD_WORKERS` | `1` | 执行队列并发数（1-16）：默认串行，团队规模上来后调大 |
+| `TD_KEEP_DAYS` | `30` | 截图与执行录像保留天数 |
 | `TD_SHOT_DIFF` | `1` | 设为 0 关闭流程截图基线对比 |
 | `TD_SHOT_DIFF_PCT` | `2` | 截图与基线的差异阈值（百分比，超过判失败） |
 | `TD_BROWSER_ENGINE` | `chromium` | `lightpanda` 启用轻量引擎 |

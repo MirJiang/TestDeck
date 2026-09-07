@@ -23,10 +23,12 @@ def resolve_database_url() -> str:
 
 def make_engine(url: str):
     if url.startswith("sqlite"):
-        kwargs = {"connect_args": {"check_same_thread": False}}
+        # busy_timeout：TD_WORKERS>1 并发执行时写锁等待自动重试，而非立刻报 database is locked
+        kwargs = {"connect_args": {"check_same_thread": False, "timeout": 30}}
         if url == "sqlite://":  # 内存库：测试用，需单连接共享
             from sqlalchemy.pool import StaticPool
             kwargs["poolclass"] = StaticPool
+            kwargs["connect_args"] = {"check_same_thread": False}
         return create_engine(url, **kwargs)
     return create_engine(url, pool_pre_ping=True)  # MySQL/PG 长连接断线自愈
 

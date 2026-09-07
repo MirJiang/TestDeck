@@ -96,6 +96,8 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
     api_clients = {}   # role -> httpx.Client
     browser = pages = contexts = None
     _pw = None
+    videos = {}        # role -> 视频静态路径（角色会话的执行录像）
+    role_names = {k: (r.get("name") or k) for k, r in roles.items()}
     diff_pct = float(config.get("TD_SHOT_DIFF_PCT") or 2)
 
     def role_api(role):
@@ -118,6 +120,8 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
         if role not in pages:
             contexts[role] = browser.new_context()   # 每角色独立会话
             pages[role] = contexts[role].new_page()
+            from .ui_runner import start_run_video
+            videos[role] = start_run_video(pages[role], run_id, tag=role)
         return pages[role]
 
     def close_all():
@@ -198,13 +202,20 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
             time.sleep(0.1)
             page.mouse.up()
             res.update(**{"pass": True, "reason": f"拖拽 ({x1},{y1})→({x2},{y2})"})
-        elif action == "ai":  # AI 代劳步骤：在角色会话内现场重新执行目标
+        elif action == "ai":  # AI 代劳步骤：在角色会话内现场重新执行目标，失败自动重试
             from .ai_runner import ai_drive
-            r = ai_drive(page, val, {**role_vars.get(role, {}), **shared},
-                         max_steps=60, run_id=run_id, shot_tag=f"{run_id}-{tag}")
+            retries = max(0, min(3, int(step.get("retries", 1))) if str(step.get("retries", "1")).strip() != "" else 1)
+            r, attempt = {}, 0
+            for attempt in range(retries + 1):
+                r = ai_drive(page, val, {**role_vars.get(role, {}), **shared},
+                             max_steps=60, run_id=run_id, shot_tag=f"{run_id}-{tag}")
+                if r.get("status") == "passed":
+                    break
             ok = r.get("status") == "passed"
-            res.update(**{"pass": ok,
-                          "reason": (r.get("summary") or ("AI 完成目标" if ok else "AI 未完成目标"))[:120]})
+            reason = (r.get("summary") or ("AI 完成目标" if ok else "AI 未完成目标"))[:120]
+            if attempt:
+                reason += f"（自动重试 {attempt} 次后{'成功' if ok else '仍失败'}）"
+            res.update(**{"pass": ok, "reason": reason})
         elif action == "fill":
             page.fill(sel, val, timeout=8000)
             res.update(**{"pass": True, "reason": f"在 {sel} 输入 {val}"})
@@ -404,6 +415,9 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
                 fail_n += 1
                 break
     finally:
+        for role, pg in list((pages or {}).items()):   # 角色会话录像落盘并挂到明细尾部
+            from .ui_runner import finish_run_video
+            finish_run_video(pg, videos.get(role), detail, label=f"「{role_names.get(role, role)}」执行录像")
         close_all()
 
     return {"status": "failed" if fail_n else "passed", "pass_n": pass_n, "fail_n": fail_n,

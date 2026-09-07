@@ -17,6 +17,32 @@ STATIC_DIR.mkdir(exist_ok=True)
 ACTIONS = {"goto", "click", "fill", "expect_text", "screenshot", "click_xy", "drag", "ai"}
 
 
+def start_run_video(page, run_id: str, tag: str = "") -> str | None:
+    """开始录制执行视频（Chromium Screencast 落盘 webm），返回静态访问路径。
+
+    Lightpanda 等引擎不支持 Screencast 时返回 None，调用方跳过即可（能力自检、自动降级）。
+    """
+    path = STATIC_DIR / f"{run_id}{'-' + tag if tag else ''}.webm"
+    try:
+        page.screencast.start(path=str(path))
+        return f"/static/{path.name}"
+    except Exception:
+        return None
+
+
+def finish_run_video(page, video_url: str | None, detail: list, label: str = "") -> None:
+    """停止录制并把视频入口追加为最后一条执行明细（前端据此展示播放器）。"""
+    if not video_url:
+        return
+    try:
+        page.screencast.stop()   # 停止并落盘
+    except Exception:
+        pass
+    detail.append({"idx": len(detail) + 1, "action": "video", "target": label or "执行录像",
+                   "pass": True, "reason": "执行过程录像（随截图一起定期清理）",
+                   "video": video_url, "ms": 0})
+
+
 def _px(step: dict, page, key: str, axis: str) -> int:
     """比例坐标换算成当前视图像素（录制时按 1280×800 归一化，回放适配任意视口）。"""
     vs = page.viewport_size or {"width": 1280, "height": 800}
@@ -37,6 +63,7 @@ def _sync_run(case, env, run_id: str, engine: str | None = None) -> dict:
                     "detail": [{"idx": 1, "action": "error", "target": "", "pass": False,
                                 "reason": str(e)[:300], "ms": 0}]}
         page = browser.new_page()
+        video_url = start_run_video(page, run_id)
         for i, step in enumerate(case.steps or [], 1):
             action = step.get("action", "goto")
             url, sel, val = step.get("url", ""), step.get("selector", ""), step.get("value", "")
@@ -83,16 +110,22 @@ def _sync_run(case, env, run_id: str, engine: str | None = None) -> dict:
                     time.sleep(0.1)
                     page.mouse.up()
                     res.update(**{"pass": True, "reason": f"拖拽 ({x1},{y1})→({x2},{y2})"})
-                elif action == "ai":  # AI 代劳步骤：回放时 AI 现场重新执行（动态内容每次重识别）
+                elif action == "ai":  # AI 代劳步骤：回放时 AI 现场重新执行（动态内容每次重识别），失败自动重试
                     from .ai_runner import ai_drive
                     _vars = dict(env.variables or {}) if env else {}
                     if getattr(case, "username", ""):
                         _vars["username"], _vars["password"] = case.username, getattr(case, "password", "") or ""
-                    r = ai_drive(page, val, _vars,
-                                 max_steps=60, run_id=run_id, shot_tag=f"{run_id}-ai{i}")
+                    retries = max(0, min(3, int(step.get("retries", 1))) if str(step.get("retries", "1")).strip() != "" else 1)
+                    r, attempt = {}, 0
+                    for attempt in range(retries + 1):
+                        r = ai_drive(page, val, _vars, max_steps=60, run_id=run_id, shot_tag=f"{run_id}-ai{i}")
+                        if r.get("status") == "passed":
+                            break
                     ok = r.get("status") == "passed"
-                    res.update(**{"pass": ok,
-                                  "reason": (r.get("summary") or ("AI 完成目标" if ok else "AI 未完成目标"))[:120]})
+                    reason = (r.get("summary") or ("AI 完成目标" if ok else "AI 未完成目标"))[:120]
+                    if attempt:
+                        reason += f"（自动重试 {attempt} 次后{'成功' if ok else '仍失败'}）"
+                    res.update(**{"pass": ok, "reason": reason})
                 else:
                     res["reason"] = f"不支持的动作：{action}"
             except Exception as e:
@@ -104,6 +137,7 @@ def _sync_run(case, env, run_id: str, engine: str | None = None) -> dict:
             else:
                 fail_n += 1
                 break  # UI 步骤失败即中止（页面状态已不可靠）
+        finish_run_video(page, video_url, detail)
         browser.close()
 
     return {"status": "failed" if fail_n else "passed", "pass_n": pass_n, "fail_n": fail_n,

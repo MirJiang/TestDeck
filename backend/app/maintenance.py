@@ -13,9 +13,10 @@ def cleanup_screenshots() -> int:
         return 0
     cutoff = time.time() - keep_days * 86400
     n = 0
-    for f in STATIC_DIR.glob("*.png"):
-        if f.stat().st_mtime < cutoff:
-            f.unlink(); n += 1
+    for pattern in ("*.png", "*.webm"):   # 截图与执行录像一起按期清理
+        for f in STATIC_DIR.glob(pattern):
+            if f.stat().st_mtime < cutoff:
+                f.unlink(); n += 1
     return n
 
 

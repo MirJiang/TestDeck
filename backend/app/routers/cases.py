@@ -1,8 +1,10 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..db import get_db, SessionLocal
-from ..models import User, Project, TestCase
+from ..models import User, Project, TestCase, Env
 from ..auth import current_user, resolve_token
 from ..perms import check_project_access, accessible_project_ids
 
@@ -48,6 +50,12 @@ class CaseIn(BaseModel):
     # 绑定的测试账号（从项目用户列表带出，可改）：执行时注入 ${username}/${password}
     username: str = ""
     password: str = ""
+
+
+class CaseImportIn(BaseModel):
+    format: str          # har | postman
+    name: str = ""
+    text: str
 
 
 def _steps_for_store(body: CaseIn) -> list[dict]:
@@ -125,6 +133,38 @@ def update_case(cid: str, body: CaseIn, db: Session = Depends(get_db), user: Use
     c.username, c.password = body.username, body.password
     db.commit()
     return {"ok": True}
+
+
+@router.post("/projects/{pid}/cases/import-assets")
+def import_cases_assets(pid: str, body: CaseImportIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """存量测试资产导入：HAR（浏览器请求日志）或 Postman Collection v2.x → API 用例。"""
+    from ..engine.importer import parse_har, parse_postman
+    check_project_access(pid, user, db)
+    env = db.query(Env).filter(Env.project_id == pid).first()
+    base = (env.base_url or "").rstrip("/") if env else ""
+    fmt = (body.format or "").strip().lower()
+    names = []
+    try:
+        if fmt == "har":
+            d = parse_har(body.text, base)
+            name = body.name.strip() or "HAR 导入用例"
+            db.add(TestCase(project_id=pid, name=name, type="api", steps=d["steps"],
+                            source="import", creator_id=user.id))
+            names.append(name)
+        elif fmt == "postman":
+            for d in parse_postman(body.text, base):
+                name = ((body.name.strip() + " · ") if body.name.strip() else "") + d["name"]
+                db.add(TestCase(project_id=pid, name=name, type="api", steps=d["steps"],
+                                source="import", creator_id=user.id))
+                names.append(name)
+        else:
+            raise HTTPException(400, "格式仅支持 har / postman")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except json.JSONDecodeError:
+        raise HTTPException(400, "文件内容不是合法 JSON")
+    db.commit()
+    return {"count": len(names), "names": names[:20]}
 
 
 @router.post("/cases/{cid}/copy")

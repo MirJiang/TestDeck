@@ -16,6 +16,32 @@ const envs = ref([])
 const err = ref('')
 const aiOpen = ref(false)
 const nlShow = ref(false)
+// ---- HAR / Postman 存量资产导入 ----
+const impOpen = ref(false)
+const impForm = ref({ format: 'har', name: '', text: '' })
+const impErr = ref('')
+const impBusy = ref(false)
+
+function onImpFile(e) {
+  const f = e.target.files[0]
+  if (!f) return
+  const r = new FileReader()
+  r.onload = () => { impForm.value.text = r.result; if (!impForm.value.name) impForm.value.name = f.name.replace(/\.[^.]+$/, '') }
+  r.readAsText(f)
+}
+
+async function doImport() {
+  impErr.value = ''
+  if (!impForm.value.text.trim()) { impErr.value = '先粘贴或选择文件'; return }
+  impBusy.value = true
+  try {
+    const r = await api(`/projects/${pid.value}/cases/import-assets`, { method: 'POST', body: impForm.value })
+    toast(`已导入 ${r.count} 个用例${r.names?.length ? '：' + r.names.slice(0, 3).join('、') + (r.count > 3 ? ' 等' : '') : ''}`)
+    impOpen.value = false
+    impForm.value = { format: 'har', name: '', text: '' }
+    load()
+  } catch (e) { impErr.value = e.message } finally { impBusy.value = false }
+}
 const nlPrompt = ref('')
 const nlDraft = ref(null)
 const nlLoading = ref(false)
@@ -96,6 +122,7 @@ const filtered = () => list.value.filter(c => c.name.includes(q.value.trim()))
     <div style="display:flex;gap:8px">
       <button class="btn" @click="nlShow = true" :disabled="!pid">AI · 说句话生成</button>
       <button class="btn" @click="aiOpen = true">AI · 从提交生成</button>
+      <button class="btn" @click="impOpen = true" :disabled="!pid">导入 HAR/Postman</button>
       <button class="btn pri" @click="openNew" :disabled="!pid">新建用例</button>
     </div></div>
   <div class="panel">
@@ -137,6 +164,30 @@ const filtered = () => list.value.filter(c => c.name.includes(q.value.trim()))
   <RunDrawer v-if="running" :title="running.title" :caseId="running.caseId" :caseType="running.caseType" :envs="envs"
     @close="running = null" @done="load" />
   <AiDrawer v-if="aiOpen" :projects="projects" @close="aiOpen = false" @done="load" @saved="load" />
+
+  <!-- 存量资产导入：HAR / Postman Collection -->
+  <div class="mask" :class="{ on: impOpen }" @click.self="impOpen = false">
+    <div class="modal" style="width:620px" v-if="impOpen">
+      <h3>导入存量测试资产</h3>
+      <div class="fld"><label>格式</label>
+        <select v-model="impForm.format">
+          <option value="har">HAR（浏览器开发者工具导出的请求日志 → 一个多步骤用例）</option>
+          <option value="postman">Postman Collection v2.x（每个请求 → 一个用例）</option>
+        </select></div>
+      <div class="fld"><label>用例名前缀（可选）</label>
+        <input v-model="impForm.name" placeholder="如：回归-2026Q4"></div>
+      <div class="fld"><label>文件（或直接粘贴 JSON 内容）</label>
+        <input type="file" accept=".har,.json,application/json" @change="onImpFile"></div>
+      <div class="fld"><label>内容</label>
+        <textarea v-model="impForm.text" rows="6" class="mono" placeholder='{"log": {"entries": ...}}'></textarea></div>
+      <div class="faint" style="font-size:12px;margin:-4px 0 8px">
+        静态资源请求自动过滤；与项目环境地址同源的请求转为相对路径。Postman 的测试脚本不会迁移，导入后可在用例里补检查点。
+      </div>
+      <div v-if="impErr" style="color:var(--err);font-size:12.5px;margin-bottom:8px">{{ impErr }}</div>
+      <div class="ft"><button class="btn" @click="impOpen = false">取消</button>
+        <button class="btn pri" :disabled="impBusy" @click="doImport">{{ impBusy ? '导入中…' : '导入' }}</button></div>
+    </div>
+  </div>
 
   <div class="mask" :class="{ on: nlShow }" @click.self="nlShow = false">
     <div class="modal">

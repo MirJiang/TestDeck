@@ -154,17 +154,24 @@ Vue 3 SPA ──▶ FastAPI ──▶ 执行引擎（单线程串行队列）
 ## 🧪 测试
 
 ```bash
-cd backend && .venv/Scripts/python -m pytest tests -q   # 64 个单元/接口测试（含安全用例）
+cd backend && .venv/Scripts/python -m pytest tests -q   # 76 个单元/接口测试（含安全用例）
 # E2E：起后端与 mock 被测系统后依次跑 tests/e2e*.py
 ```
 
 ## 🗺️ Roadmap
 
-- [ ] Lightpanda 引擎正式支持（等其补齐 Windows 构建与截图能力）
-- [ ] UI 用例执行视频回放 / trace
-- [ ] 截图视觉回归（像素 diff）
-- [ ] Postman / Har 用例导入
-- [ ] 执行并发队列（多 worker + 锁库保护）
+**已完成**
+
+- [x] 截图视觉回归（流程截图基线像素 diff，超阈值判失败并出对比图）
+- [x] 接口文档导入（Swagger / OpenAPI / Postman Collection，AI 按真实接口设计请求）
+- [x] UI 用例执行视频回放（Chromium Screencast 落盘 webm，用例与流程执行明细内可播放，随截图定期清理）
+- [x] Postman / Har 用例批量导入（HAR → 多步骤用例；Postman Collection → 每请求一用例，静态资源过滤、同源相对化）
+- [x] AI 主导测试增强（AI 步骤失败自动重试；失败摘要带模型分档建议）
+- [x] 执行并发队列（`TD_WORKERS` 可配 1-16 并发，默认 1 保持串行；SQLite busy_timeout 锁保护）
+
+**准备做**
+
+- [ ] Lightpanda 引擎正式支持（视频录像与视觉截图已做能力自检自动降级；正式支持等上游补齐 Windows 构建与截图能力）
 
 ## 📄 许可证
 

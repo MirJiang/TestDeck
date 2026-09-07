@@ -138,6 +138,7 @@ function toggleItem(i) { expandedItem.value = expandedItem.value === i ? -1 : i 
             <div v-if="s.think" class="muted" style="font-size:12px;margin-top:5px;color:var(--acc)">🤖 {{ s.think }}</div>
             <div class="muted" style="font-size:12.5px;margin-top:6px">{{ s.pass ? '✓ ' : '✗ ' }}{{ s.reason }}（{{ s.ms }}ms）</div>
             <img v-if="s.screenshot" :src="s.screenshot" style="max-width:100%;border:1px solid var(--line);border-radius:6px;margin-top:8px">
+            <video v-if="s.video" :src="s.video" controls style="max-width:100%;border:1px solid var(--line);border-radius:6px;margin-top:8px"></video>
             <div v-if="!s.pass && s.response" class="muted mono" style="font-size:11.5px;margin-top:6px;color:var(--err);word-break:break-all">{{ s.response?.slice(0, 300) }}</div>
           </div>
         </template>
