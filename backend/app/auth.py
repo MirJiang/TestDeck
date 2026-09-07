@@ -78,6 +78,19 @@ def make_token(user: User) -> str:
     return jwt.encode(payload, _secret(), algorithm="HS256")
 
 
+def resolve_token(token: str, db) -> User | None:
+    """直接解析令牌串返回用户；供 WebSocket 等无法携带 Authorization 头的场景使用。"""
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, _secret(), algorithms=["HS256"])
+        if payload.get("epoch", 0) != _token_version():
+            return None
+    except JWTError:
+        return None
+    return db.get(User, payload["sub"])
+
+
 def current_user(cred: HTTPAuthorizationCredentials = Depends(bearer), db: Session = Depends(get_db)) -> User:
     if cred is None:
         raise HTTPException(401, "未登录")

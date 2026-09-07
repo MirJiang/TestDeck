@@ -48,7 +48,7 @@ async function load() {
 
 function openNew() {
   editing.value = { id: '', project_id: pid.value, name: '', type: 'ai', target: 'ui',
-    goal: '', start_url: '', engine: '', max_steps: 20, fixedSteps: [] }
+    goal: '', start_url: '', engine: '', max_steps: 30, fixedSteps: [], username: '', password: '' }
 }
 async function openEdit(id) {
   const c = await api('/cases/' + id)
@@ -56,9 +56,9 @@ async function openEdit(id) {
   const cfg = c.steps?.[0] || {}
   editing.value = { id: c.id, project_id: c.project_id, name: c.name, type: 'ai',
     target: cfg.target || 'ui', goal: cfg.goal || '', start_url: cfg.start_url || '',
-    engine: cfg.engine || '', max_steps: cfg.max_steps || 20,
-    endpoints: cfg.endpoints || [], fixedSteps: cfg.fixed_steps || []
-  }
+    engine: cfg.engine || '', max_steps: cfg.max_steps || 30,
+    endpoints: cfg.endpoints || [], fixedSteps: cfg.fixed_steps || [],
+    username: c.username || '', password: c.password || '' }
 }
 
 async function save(c) {
@@ -66,7 +66,8 @@ async function save(c) {
   const body = { project_id: c.project_id, name: c.name, type: 'ai', target: c.target || 'ui',
     goal: c.goal || '', start_url: c.start_url || '', engine: c.engine || '',
     max_steps: c.max_steps || 20, endpoints: c.endpoints || [],
-    fixed_steps: c.fixedSteps || [], source: c.source }
+    fixed_steps: c.fixedSteps || [], source: c.source,
+    username: c.username || '', password: c.password || '' }
   try {
     if (c.id) await api('/cases/' + c.id, { method: 'PUT', body })
     else await api(`/projects/${c.project_id}/cases`, { method: 'POST', body })
@@ -100,7 +101,7 @@ const filtered = () => list.value.filter(c => c.name.includes(q.value.trim()))
   <div class="panel">
     <div class="bar">
       <div style="display:flex;gap:8px">
-        <select v-model="pid" @change="load"><option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option></select>
+        <select v-model="pid" @change="load"><option v-if="!projects.length" value="" disabled>暂无项目，请先创建</option><option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option></select>
         <input v-model="q" placeholder="筛选用例名…" style="width:180px">
       </div>
       <span class="muted">{{ filtered().length }} 条</span>

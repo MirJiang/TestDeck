@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { api } from '../api'
 import FlowDiagram from '../components/FlowDiagram.vue'
 import RecorderModal from '../components/RecorderModal.vue'
@@ -22,6 +22,7 @@ const UI_ACTIONS = [
   { action: 'click', label: '点击' },
   { action: 'fill', label: '在输入框输入' },
   { action: 'expect_text', label: '检查页面显示的文字' },
+  { action: 'ai', label: 'AI 代劳（现场执行目标）' },
   { action: 'screenshot', label: '截图留档' },
 ]
 
@@ -39,7 +40,7 @@ async function load() {
 function openNew() {
   editing.value = {
     id: '', project_id: pid.value, name: '', desc: '',
-    roles: [{ key: 'shipper', name: '货主', variables: { username: '', password: '' } }],
+    roles: [{ key: 'r1', name: '', variables: { username: '', password: '' } }],
     steps: [],
   }
   selected.value = -1
@@ -79,8 +80,33 @@ function moveStep(i, d) {
   selected.value = i + d
 }
 
-function addRole() { editing.value.roles.push({ key: '', name: '', variables: { username: '', password: '' } }) }
+function addRole() {
+  // 角色只填名称；标识是内部字段（步骤按它引用），自动生成防碰撞
+  const keys = new Set(editing.value.roles.map(r => r.key))
+  let n = editing.value.roles.length + 1
+  while (keys.has('r' + n)) n++
+  editing.value.roles.push({ key: 'r' + n, name: '', variables: { username: '', password: '' } })
+}
 function delRole(i) { editing.value.roles.splice(i, 1) }
+
+// 项目用户池：角色从用户下拉选择，带出名称/账号/密码（密码仍可手改）
+const pusers = ref([])
+watch(pid, async v => { pusers.value = v ? await api(`/projects/${v}/users`).catch(() => []) : [] }, { immediate: true })
+function onPickUser(r) {
+  const u = pusers.value.find(x => x.id === r.userId)
+  if (!u) return
+  r.name = u.name || u.username
+  r.variables.username = u.username
+  r.variables.password = u.password
+}
+// 编辑已有流程时按账号回选用户下拉
+watch(pusers, list => {
+  if (!editing.value) return
+  editing.value.roles.forEach(r => {
+    if (!r.userId && r.variables?.username)
+      r.userId = (list.find(u => u.username === r.variables.username) || {}).id || ''
+  })
+})
 
 // ---- 角色录制：可视化录制弹窗，录完的步骤挂到该角色名下 ----
 const recOpen = ref(false)
@@ -199,7 +225,7 @@ function stepsFor(result) {
 
   <div class="panel">
     <div class="bar">
-      <select v-model="pid" @change="load"><option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option></select>
+      <select v-model="pid" @change="load"><option v-if="!projects.length" value="" disabled>暂无项目，请先创建</option><option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option></select>
       <span class="muted">{{ list.length }} 条流程</span>
     </div>
     <table>
@@ -215,7 +241,7 @@ function stepsFor(result) {
             <a style="color:var(--err)" @click="del(f)">删除</a></td>
         </tr>
         <tr v-if="!list.length"><td colspan="5" class="empty">
-          {{ pid ? '暂无流程，点右上角新建；或参考内置的「询价单全流程」演示' : '请先创建项目' }}</td></tr>
+          {{ pid ? '暂无流程，点右上角新建；先加角色（各自登录），再用录制或手动步骤串出业务线' : '请先创建项目' }}</td></tr>
       </tbody>
     </table>
   </div>
@@ -231,13 +257,21 @@ function stepsFor(result) {
         <h3 style="font-size:13px">角色（每个角色独立登录）</h3>
         <button class="btn sm" @click="addRole">+ 加角色</button>
       </div>
-      <div v-for="(r, i) in editing.roles" :key="i" class="row" style="border:1px solid var(--line);border-radius:7px;padding:10px;margin-bottom:8px">
-        <input v-model="r.key" placeholder="标识，如 shipper" style="width:120px" class="mono">
-        <input v-model="r.name" placeholder="名称，如 货主" style="width:100px">
-        <input v-model="r.variables.username" placeholder="登录账号" style="width:110px">
-        <input v-model="r.variables.password" placeholder="登录密码" type="password" style="width:110px">
-        <button class="btn sm" :disabled="recOpen" @click="recordRole(r)">● 录制</button>
-        <button style="background:none;color:var(--err)" @click="delRole(i)">删</button>
+      <div v-for="(r, i) in editing.roles" :key="i"
+           style="display:flex;gap:8px;align-items:center;border:1px solid var(--line);border-radius:7px;padding:10px;margin-bottom:8px">
+        <input v-model="r.name" placeholder="角色名称，如 货主" style="width:118px;flex:none">
+        <select v-model="r.userId" style="flex:1;min-width:150px" @change="onPickUser(r)"
+                title="从项目测试用户里选（项目页「用户」维护），选中带出名称与账号密码">
+          <option value="">— 选择测试用户 —</option>
+          <option v-for="u in pusers" :key="u.id" :value="u.id">{{ u.name ? `${u.name}（${u.username}）` : u.username }}</option>
+        </select>
+        <input v-model="r.variables.password" placeholder="登录密码" type="password" style="width:108px;flex:none"
+               title="选择用户后自动带出，可改">
+        <button class="btn sm" style="flex:none" :disabled="recOpen" @click="recordRole(r)">● 录制</button>
+        <button style="background:none;color:var(--err);flex:none" @click="delRole(i)">删</button>
+      </div>
+      <div v-if="!pusers.length" class="faint" style="font-size:12px;margin:-2px 0 8px">
+        项目还没有测试用户：先到项目页「用户」里添加或批量导入，这里就能选择带出账号密码。
       </div>
 
       <div class="bar" style="margin-top:10px">
@@ -260,7 +294,7 @@ function stepsFor(result) {
         <div class="bd">
           <div class="two">
             <div class="fld"><label>以哪个角色操作</label>
-              <select v-model="s.role"><option v-for="r in editing.roles" :key="r.key" :value="r.key">{{ r.name }}（{{ r.key }}）</option></select></div>
+              <select v-model="s.role"><option v-for="r in editing.roles" :key="r.key" :value="r.key">{{ r.name }}</option></select></div>
             <div class="fld"><label>类型</label>
               <select v-model="s.type" @change="onStepType(s)">
                 <option value="ui">页面操作（无头浏览器）</option>
@@ -305,6 +339,8 @@ function stepsFor(result) {
               <input v-model="s.value" placeholder="1280"></div>
             <div class="fld" v-if="s.action === 'expect_text'"><label>页面应显示的文字</label>
               <input v-model="s.value" placeholder="报价成功"></div>
+            <div class="fld" v-if="s.action === 'ai'"><label>AI 要完成的目标（大白话，可引用 $&#123;变量&#125;）</label>
+              <input v-model="s.value" placeholder="用 $&#123;username&#125; 登录并完成滑块验证码，进入首页为止"></div>
           </template>
 
           <template v-if="s.type === 'api'">
@@ -353,7 +389,8 @@ function stepsFor(result) {
   </div>
 
   <RecorderModal v-if="recOpen && editing" title="为角色录制操作" :envs="envs"
-    :role-note="`以「${recRole?.name}」的身份录制`" @done="onRecDone" @close="recOpen = false" />
+    :initial-url="envs[0]?.base_url || ''"
+    :role-note="`以「${recRole?.name}」的身份录制`" :preset-vars="recRole?.variables || {}" @done="onRecDone" @close="recOpen = false" />
 
   <!-- 执行抽屉（泳道图 + 截图） -->
   <div class="drawer on" v-if="running">
@@ -361,7 +398,7 @@ function stepsFor(result) {
     <div class="db">
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
         <span class="muted">环境</span>
-        <select v-model="runEnv"><option v-for="e in envs" :key="e.id" :value="e.id">{{ e.name }}</option></select>
+        <select v-model="runEnv"><option v-if="!envs.length" value="" disabled>暂无环境</option><option v-for="e in envs" :key="e.id" :value="e.id">{{ e.name }}</option></select>
         <button v-if="runLoading" class="btn" style="margin-left:auto" @click="cancelRun">取消执行</button>
         <button v-else class="btn pri" style="margin-left:auto" :disabled="!runEnv" @click="doRun">
           {{ result ? '再次执行' : '立即执行' }}</button>

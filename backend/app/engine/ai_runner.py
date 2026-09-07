@@ -22,7 +22,7 @@ from . import queue as _q
 
 STATIC_DIR.mkdir(exist_ok=True)
 
-DEFAULT_MAX_STEPS = 20
+DEFAULT_MAX_STEPS = 30
 
 # 提取页面状态：可见的交互元素（选择器/文字/当前值）+ 标题 + 文字摘要
 # 选择器兜底顺序：id > name > placeholder 属性 > type 属性 > 同标签可见序号。
@@ -133,10 +133,19 @@ def _do_request(client, req: dict, check: dict, variables: dict):
     return chk["pass"], chk["reason"], resp.status_code, text, bj
 
 
+def _case_vars(case, env) -> dict:
+    """执行变量 = 环境变量 + 用例绑定的测试账号（username/password，从项目用户列表带出）。"""
+    variables = dict(env.variables or {}) if env else {}
+    if getattr(case, "username", ""):
+        variables["username"] = case.username
+        variables["password"] = getattr(case, "password", "") or ""
+    return {k: str(v) for k, v in variables.items()}
+
+
 def run_ai_api_case(case, env, run_id: str, on_step=None) -> dict:
     """AI-API 用例：模型设计请求 → httpx 执行 → 检查/存变量 → 循环。由执行队列线程调用。"""
     cfg = (case.steps or [{}])[0] if case.steps else {}
-    variables = {k: str(v) for k, v in (env.variables or {}).items()} if env else {}
+    variables = _case_vars(case, env)
     goal = substitute(cfg.get("goal", ""), variables)
     base = (env.base_url or "").rstrip("/") if env else ""
     max_steps = int(cfg.get("max_steps") or 12)
@@ -425,7 +434,7 @@ def ai_drive(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEP
         system = _SYSTEM
         if use_vision:
             try:  # 视觉模式：视口截图（坐标与截图一一对应）
-                image_b64 = base64.b64encode(page.screenshot(type="jpeg", quality=60)).decode()
+                image_b64 = base64.b64encode(page.screenshot(type="jpeg", quality=80)).decode()
                 system = _SYSTEM + _SYSTEM_VISION
             except Exception:
                 image_b64 = None  # 截图失败（如 Lightpanda 不支持）退回纯文本决策
@@ -503,7 +512,7 @@ def run_ai_case(case, env, run_id: str, on_step=None) -> dict:
       - 其余                  → 浏览器 + ai_drive（模型看页面操作）
     """
     cfg = (case.steps or [{}])[0] if case.steps else {}
-    variables = dict(env.variables or {}) if env else {}
+    variables = _case_vars(case, env)
     goal = substitute(cfg.get("goal", ""), variables)
     target = (cfg.get("target") or "ui").strip().lower()
     engine = (cfg.get("engine") or "").strip().lower() or None

@@ -97,7 +97,7 @@ function toggleItem(i) { expandedItem.value = expandedItem.value === i ? -1 : i 
     <div class="db">
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
         <span class="muted">环境</span>
-        <select v-model="envId"><option v-for="e in envs" :key="e.id" :value="e.id">{{ e.name }}</option></select>
+        <select v-model="envId"><option v-if="!envs.length" value="" disabled>暂无环境，可在项目页添加</option><option v-for="e in envs" :key="e.id" :value="e.id">{{ e.name }}</option></select>
         <button v-if="running" class="btn" style="margin-left:auto" @click="cancel">取消执行</button>
         <button v-else class="btn pri" style="margin-left:auto" :disabled="!envId" @click="run">
           {{ result ? '再次执行' : '立即执行' }}</button>

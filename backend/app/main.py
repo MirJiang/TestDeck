@@ -35,11 +35,13 @@ def _migrate():
                     conn.execute(text("ALTER TABLE llm_configs ADD COLUMN vision BOOLEAN DEFAULT FALSE"))
                 else:  # sqlite / mysql
                     conn.execute(text("ALTER TABLE llm_configs ADD COLUMN vision BOOLEAN DEFAULT 0"))
-    # 计划支持包含流程；流程执行记录统一并入 test_runs
+    # 计划支持包含流程；流程执行记录统一并入 test_runs；用例绑定测试账号
     for table, column, ddl in [
         ("test_plans", "flow_ids", "JSON"),
         ("test_runs", "flow_id", "VARCHAR(64)"),
         ("test_runs", "flow_name", "VARCHAR(255)"),
+        ("test_cases", "username", "VARCHAR(255) DEFAULT ''"),
+        ("test_cases", "password", "VARCHAR(255) DEFAULT ''"),
     ]:
         if table in insp.get_table_names():
             cols = {c["name"] for c in insp.get_columns(table)}

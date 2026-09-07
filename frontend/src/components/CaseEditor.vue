@@ -14,10 +14,10 @@ const recMsg = ref('')
 const envs = ref([])   // 供录制弹窗「AI 代劳」注入环境变量
 
 async function openRec() {
-  recOpen.value = true
   if (!envs.value.length && c.value.project_id) {
     try { envs.value = await api(`/projects/${c.value.project_id}/envs`) } catch { /* 无环境也能录 */ }
   }
+  recOpen.value = true   // 先取环境再弹窗：地址预填才来得及
 }
 
 function onRecDone(steps) {
@@ -106,6 +106,29 @@ function toggleEp(ep) {
 const hasEp = ep => (c.value.endpoints || []).some(x => x.method === ep.method && x.path === ep.path)
 
 function save() { emit('save', JSON.parse(JSON.stringify(c.value))) }
+
+// ---- 测试账号：项目用户列表选择带出，可改；执行与录制时注入 ${username}/${password} ----
+const pusers = ref([])
+const selUser = ref('')
+watch(() => c.value.project_id, async pid => {
+  pusers.value = []; selUser.value = ''
+  if (pid) { try { pusers.value = await api(`/projects/${pid}/users`) } catch { /* 无用户也可手填 */ } }
+}, { immediate: true })
+function onPickUser() {
+  const u = pusers.value.find(x => x.id === selUser.value)
+  if (u) { c.value.username = u.username; c.value.password = u.password }
+}
+const presetVars = computed(() => (c.value.username ? { username: c.value.username, password: c.value.password || '' } : {}))
+
+// 录制弹窗预填地址 = 环境地址 + 起始页面（起始页面若已是完整 URL 则直接用）
+const recInitialUrl = computed(() => {
+  const base = (envs.value[0]?.base_url || '').replace(/\/+$/, '')
+  const path = (c.value.start_url || '').trim()
+  if (/^https?:\/\//.test(path)) return path
+  if (!base) return path
+  if (!path) return base
+  return base + (path.startsWith('/') ? path : '/' + path)
+})
 </script>
 
 <template>
@@ -120,12 +143,25 @@ function save() { emit('save', JSON.parse(JSON.stringify(c.value))) }
             <option value="api">API 测试（接口调用）</option>
           </select></div>
         <div class="fld"><label>最大步数（防止失控）</label>
-          <input v-model.number="c.max_steps" type="number" min="3" max="60" placeholder="20"></div>
+          <input v-model.number="c.max_steps" type="number" min="3" max="99" placeholder="30"></div>
       </div>
 
       <div class="fld"><label>测试目标（用大白话描述要做的事和预期结果，可引用 ${'{'}变量{'}'} 如账号密码）</label>
         <textarea v-model="c.goal" rows="4"
           :placeholder="isUI ? '用 ${username} 登录系统，创建一张从上海到北京的询价单，记住单号，页面应提示创建成功' : '调用创建询价单接口，用 ${username} 的身份创建一张上海到北京的单据，应返回 code=0 并记住单号'"></textarea></div>
+
+      <div class="two">
+        <div class="fld"><label>测试账号（项目用户列表带出，可改）</label>
+          <select v-model="selUser" @change="onPickUser">
+            <option value="">— 手动填写 / 不使用 —</option>
+            <option v-for="u in pusers" :key="u.id" :value="u.id">{{ u.name ? `${u.name}（${u.username}）` : u.username }}</option>
+          </select></div>
+        <div class="fld"><label>账号 / 密码（执行时注入 $&#123;username&#125; $&#123;password&#125;）</label>
+          <div style="display:flex;gap:8px">
+            <input v-model="c.username" class="mono" placeholder="username" style="flex:1">
+            <input v-model="c.password" class="mono" type="password" placeholder="password" style="flex:1">
+          </div></div>
+      </div>
 
       <template v-if="isUI">
         <div class="two">
@@ -215,5 +251,6 @@ function save() { emit('save', JSON.parse(JSON.stringify(c.value))) }
     </div>
     <div class="df"><button class="btn" @click="emit('close')">取消</button><button class="btn pri" @click="save">保存用例</button></div>
   </div>
-  <RecorderModal v-if="recOpen" title="录制固定步骤" :envs="envs" @done="onRecDone" @close="recOpen = false" />
+  <RecorderModal v-if="recOpen" title="录制固定步骤" :envs="envs" :preset-vars="presetVars"
+    :initial-url="recInitialUrl" @done="onRecDone" @close="recOpen = false" />
 </template>

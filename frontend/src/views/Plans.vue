@@ -106,9 +106,10 @@ function run(pl) {
         <div class="two">
           <div class="fld"><label>项目</label>
             <select v-model="form.project_id" @change="onProjectChange">
+              <option v-if="!projects.length" value="" disabled>暂无项目，请先创建</option>
               <option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option></select></div>
           <div class="fld"><label>环境</label>
-            <select v-model="form.env_id"><option v-for="e in envsOf[form.project_id] || []" :key="e.id" :value="e.id">{{ e.name }}</option></select></div>
+            <select v-model="form.env_id"><option v-if="!(envsOf[form.project_id] || []).length" value="" disabled>暂无环境，可在项目页添加</option><option v-for="e in envsOf[form.project_id] || []" :key="e.id" :value="e.id">{{ e.name }}</option></select></div>
         </div>
         <div class="two">
           <div class="fld"><label>包含的用例（点选，{{ form.case_ids.length }} 条）</label>

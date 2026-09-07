@@ -180,6 +180,31 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
         elif action == "click":
             page.click(sel, timeout=8000)
             res.update(**{"pass": True, "reason": f"点击 {sel}"})
+        elif action == "click_xy":  # 坐标类动作（验证码）：比例坐标按角色视口换算
+            vs = page.viewport_size or {"width": 1280, "height": 800}
+            x, y = int(step.get("x", 0) * vs["width"]), int(step.get("y", 0) * vs["height"])
+            page.mouse.click(x, y)
+            res.update(**{"pass": True, "reason": f"点击坐标 ({x},{y})"})
+        elif action == "drag":
+            vs = page.viewport_size or {"width": 1280, "height": 800}
+            x1, y1 = int(step.get("x", 0) * vs["width"]), int(step.get("y", 0) * vs["height"])
+            x2, y2 = int(step.get("x2", 0) * vs["width"]), int(step.get("y2", 0) * vs["height"])
+            page.mouse.move(x1, y1)
+            page.mouse.down()
+            n = 14
+            for i in range(1, n + 1):
+                page.mouse.move(x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n)
+                time.sleep(0.03)
+            time.sleep(0.1)
+            page.mouse.up()
+            res.update(**{"pass": True, "reason": f"拖拽 ({x1},{y1})→({x2},{y2})"})
+        elif action == "ai":  # AI 代劳步骤：在角色会话内现场重新执行目标
+            from .ai_runner import ai_drive
+            r = ai_drive(page, val, {**role_vars.get(role, {}), **shared},
+                         max_steps=60, run_id=run_id, shot_tag=f"{run_id}-{tag}")
+            ok = r.get("status") == "passed"
+            res.update(**{"pass": ok,
+                          "reason": (r.get("summary") or ("AI 完成目标" if ok else "AI 未完成目标"))[:120]})
         elif action == "fill":
             page.fill(sel, val, timeout=8000)
             res.update(**{"pass": True, "reason": f"在 {sel} 输入 {val}"})

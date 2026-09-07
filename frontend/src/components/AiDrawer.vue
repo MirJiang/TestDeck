@@ -66,6 +66,7 @@ async function saveDraft(d) {
     <div class="db">
       <div class="fld"><label>项目</label>
         <select v-model="pid" @change="refresh">
+          <option v-if="!projects.length" value="" disabled>暂无项目，请先创建</option>
           <option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option>
         </select></div>
 

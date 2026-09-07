@@ -54,6 +54,21 @@ class TestCase(Base):
     source = Column(String(16), default="manual")  # manual | ai | git
     creator_id = Column(String(64))
     updated_at = Column(DateTime, default=now, onupdate=now)
+    # 绑定的测试账号（从项目用户列表带出，可改）：执行时注入 ${username}/${password}
+    username = Column(String(255), default="")
+    password = Column(String(255), default="")
+
+
+class ProjectUser(Base):
+    """项目级测试用户（账号密码池）：创建用例/流程角色时选择带出，免重复录入。"""
+    __tablename__ = "project_users"
+    id = Column(String(64), primary_key=True, default=uid)
+    project_id = Column(String(64), nullable=False, index=True)
+    name = Column(String(128), default="")     # 显示名（如：货主-王五）
+    username = Column(String(255), nullable=False)
+    password = Column(String(255), default="")
+    remark = Column(String(255), default="")
+    created_at = Column(DateTime, default=now)
 
 
 class TestPlan(Base):

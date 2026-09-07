@@ -18,28 +18,24 @@ def make_client():
     return cm
 
 
-def test_ai_actions_to_events_and_compile():
-    """AI 的动作明细转录制事件后，compile_steps 能编译出含断言的步骤。"""
+def test_ai_round_compiles_to_ai_step():
+    """AI 代劳的整轮目标编译成一个 ai 步骤（回放时 AI 现场重新执行），与人工步骤按发生顺序混排。"""
     from app.engine import ui_recorder as R
-    sess = {"events": [], "start_url": "http://x/login", "done": True, "error": "",
+    sess = {"events": [
+                {"type": "goto", "url": "http://x/login"},
+                {"type": "ai", "goal": "用 ${username} 登录并完成验证码"},
+                {"type": "click", "sel": "#menu", "tag": "a", "text": "工作台"},
+                {"type": "expect_text", "value": "欢迎回来"},
+            ],
+            "start_url": "http://x/login", "done": True, "error": "",
             "mode": "remote", "created": 0, "last_active": 0, "cmd_q": None, "ret_q": None,
             "frame": b"", "page_url": ""}
-    actions = [
-        {"action": "goto", "url": "http://x/home"},
-        {"action": "fill", "selector": "#u", "value": "sw01"},
-        {"action": "click", "selector": "#btn"},
-        {"action": "expect_text", "value": "欢迎回来"},
-        {"action": "click_xy", "x": 1, "y": 2},          # 坐标动作不转换
-        {"action": "done"},                                # 控制指令不转换
-    ]
-    n = R._append_ai_events(sess, actions)
-    assert n == 4, "只转换有稳定选择器/内容的 4 个动作"
-
     R._sessions["t-ai"] = sess
     out = R.compile_steps("t-ai")
     kinds = [s["action"] for s in out["steps"]]
-    assert kinds == ["goto", "goto", "fill", "click", "expect_text"]
-    assert out["steps"][-1]["value"] == "欢迎回来"
+    assert kinds == ["goto", "ai", "click", "expect_text"], "AI 代劳一轮只占一步，位置与录制顺序一致"
+    assert out["steps"][1]["value"] == "用 ${username} 登录并完成验证码"
+    assert out["steps"][3]["value"] == "欢迎回来"
     del R._sessions["t-ai"]
 
 

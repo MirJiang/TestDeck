@@ -14,7 +14,13 @@ from .browser import launch_browser
 STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 STATIC_DIR.mkdir(exist_ok=True)
 
-ACTIONS = {"goto", "click", "fill", "expect_text", "screenshot"}
+ACTIONS = {"goto", "click", "fill", "expect_text", "screenshot", "click_xy", "drag", "ai"}
+
+
+def _px(step: dict, page, key: str, axis: str) -> int:
+    """比例坐标换算成当前视图像素（录制时按 1280×800 归一化，回放适配任意视口）。"""
+    vs = page.viewport_size or {"width": 1280, "height": 800}
+    return int(step.get(key, 0) * vs[axis])
 
 
 def _sync_run(case, env, run_id: str, engine: str | None = None) -> dict:
@@ -36,7 +42,7 @@ def _sync_run(case, env, run_id: str, engine: str | None = None) -> dict:
             url, sel, val = step.get("url", ""), step.get("selector", ""), step.get("value", "")
             if url.startswith("/") and base:
                 url = base + url
-            res = {"idx": i, "action": action, "target": url or sel, "pass": False, "reason": "", "ms": 0}
+            res = {"idx": i, "action": action, "target": url or sel or val, "pass": False, "reason": "", "ms": 0}
             st = time.time()
             try:
                 if action == "goto":
@@ -61,6 +67,32 @@ def _sync_run(case, env, run_id: str, engine: str | None = None) -> dict:
                     path = STATIC_DIR / f"{run_id}-{i}.png"
                     page.screenshot(path=str(path), full_page=True)
                     res.update(**{"pass": True, "reason": "已截图", "screenshot": f"/static/{path.name}"})
+                elif action == "click_xy":  # 验证码点选：比例坐标按当前视口换算
+                    x, y = _px(step, page, "x", "width"), _px(step, page, "y", "height")
+                    page.mouse.click(x, y)
+                    res.update(**{"pass": True, "reason": f"点击坐标 ({x},{y})"})
+                elif action == "drag":  # 滑块：按住起点分步拖到终点，模拟人手轨迹
+                    x1, y1 = _px(step, page, "x", "width"), _px(step, page, "y", "height")
+                    x2, y2 = _px(step, page, "x2", "width"), _px(step, page, "y2", "height")
+                    page.mouse.move(x1, y1)
+                    page.mouse.down()
+                    n = 14
+                    for i2 in range(1, n + 1):
+                        page.mouse.move(x1 + (x2 - x1) * i2 / n, y1 + (y2 - y1) * i2 / n)
+                        time.sleep(0.03)
+                    time.sleep(0.1)
+                    page.mouse.up()
+                    res.update(**{"pass": True, "reason": f"拖拽 ({x1},{y1})→({x2},{y2})"})
+                elif action == "ai":  # AI 代劳步骤：回放时 AI 现场重新执行（动态内容每次重识别）
+                    from .ai_runner import ai_drive
+                    _vars = dict(env.variables or {}) if env else {}
+                    if getattr(case, "username", ""):
+                        _vars["username"], _vars["password"] = case.username, getattr(case, "password", "") or ""
+                    r = ai_drive(page, val, _vars,
+                                 max_steps=60, run_id=run_id, shot_tag=f"{run_id}-ai{i}")
+                    ok = r.get("status") == "passed"
+                    res.update(**{"pass": ok,
+                                  "reason": (r.get("summary") or ("AI 完成目标" if ok else "AI 未完成目标"))[:120]})
                 else:
                     res["reason"] = f"不支持的动作：{action}"
             except Exception as e:

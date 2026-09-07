@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from ..db import get_db
+from ..db import get_db, SessionLocal
 from ..models import User, Project, TestCase
-from ..auth import current_user
+from ..auth import current_user, resolve_token
 from ..perms import check_project_access, accessible_project_ids
 
 router = APIRouter(prefix="/api/v1", tags=["cases"])
@@ -23,6 +23,11 @@ class StepIn(BaseModel):
     action: str = ""
     selector: str = ""
     value: str = ""
+    # 坐标类动作（click_xy/drag）：归一化比例坐标（0-1），回放按视口换算
+    x: float = 0
+    y: float = 0
+    x2: float = 0
+    y2: float = 0
 
 
 class CaseIn(BaseModel):
@@ -40,6 +45,9 @@ class CaseIn(BaseModel):
     endpoints: list[dict] = []         # 引用的接口文档端点（喂给 AI 的真实接口清单）
     fixed_steps: list[dict] = []       # UI 固定步骤（录制/固化）：存在且无 goal 时回放（零 token）
     fixed_api_steps: list[dict] = []   # API 固定请求（固化）：存在且无 goal 时回放（零 token）
+    # 绑定的测试账号（从项目用户列表带出，可改）：执行时注入 ${username}/${password}
+    username: str = ""
+    password: str = ""
 
 
 def _steps_for_store(body: CaseIn) -> list[dict]:
@@ -89,7 +97,8 @@ def create_case(pid: str, body: CaseIn, db: Session = Depends(get_db), user: Use
         raise HTTPException(400, "项目不匹配")
     validate_steps(body.steps, body.type)
     c = TestCase(project_id=pid, name=body.name, type=body.type,
-                steps=_steps_for_store(body), source=body.source, creator_id=user.id)
+                steps=_steps_for_store(body), source=body.source, creator_id=user.id,
+                username=body.username, password=body.password)
     db.add(c); db.commit()
     return {"id": c.id}
 
@@ -101,7 +110,8 @@ def get_case(cid: str, db: Session = Depends(get_db), user: User = Depends(curre
         raise HTTPException(404, "用例不存在")
     check_project_access(c.project_id, user, db)
     return {"id": c.id, "project_id": c.project_id, "name": c.name, "type": c.type,
-            "steps": c.steps, "source": c.source, "updated_at": c.updated_at.isoformat()}
+            "steps": c.steps, "source": c.source, "updated_at": c.updated_at.isoformat(),
+            "username": getattr(c, "username", "") or "", "password": getattr(c, "password", "") or ""}
 
 
 @router.put("/cases/{cid}")
@@ -112,6 +122,7 @@ def update_case(cid: str, body: CaseIn, db: Session = Depends(get_db), user: Use
     check_project_access(c.project_id, user, db)
     validate_steps(body.steps, body.type)
     c.name, c.type, c.steps = body.name, body.type, _steps_for_store(body)
+    c.username, c.password = body.username, body.password
     db.commit()
     return {"ok": True}
 
@@ -124,7 +135,8 @@ def copy_case(cid: str, db: Session = Depends(get_db), user: User = Depends(curr
         raise HTTPException(404, "用例不存在")
     check_project_access(c.project_id, user, db)
     nc = TestCase(project_id=c.project_id, name=c.name + "（副本）", type=c.type,
-                 steps=c.steps, source=c.source, creator_id=user.id)
+                 steps=c.steps, source=c.source, creator_id=user.id,
+                 username=getattr(c, "username", "") or "", password=getattr(c, "password", "") or "")
     db.add(nc); db.commit()
     return {"id": nc.id}
 
@@ -184,13 +196,52 @@ def ui_record_frame(sid: str, user: User = Depends(current_user)):
     return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
+@router.websocket("/cases/ui-record/{sid}/stream")
+async def ui_record_stream(ws: WebSocket, sid: str):
+    """录制画面 WebSocket 推流：页面重绘即推送新帧（Screencast），无变化不推送。
+
+    浏览器 WebSocket 无法自定义 Authorization 头，令牌经 ?token= 传入；
+    二进制消息 = JPEG 帧，JSON 消息 = {"done": true} / {"gone": true} 控制信号。
+    """
+    db = SessionLocal()
+    try:
+        user = resolve_token(ws.query_params.get("token") or "", db)
+    finally:
+        db.close()
+    if user is None:
+        await ws.close(code=4401)
+        return
+    await ws.accept()
+    from ..engine.ui_recorder import stream_frames
+    try:
+        async for msg in stream_frames(sid):
+            if isinstance(msg, bytes):
+                await ws.send_bytes(msg)
+            else:
+                await ws.send_json(msg)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
 @router.post("/cases/ui-record/{sid}/cmd")
 def ui_record_cmd(sid: str, body: RecordCmdIn, user: User = Depends(current_user)):
     """在录制中的页面上执行一条用户指令（点击/输入/跳转/AI 代劳/滚动/完成）。"""
-    from ..engine.ui_recorder import send_cmd
-    # AI 代劳涉及多轮大模型决策，放宽等待；其余指令维持短超时
-    timeout = 170.0 if body.op == "ai" else 35.0
-    return send_cmd(sid, body.model_dump(), timeout=timeout)
+    from ..engine.ui_recorder import send_cmd, start_ai_cmd
+    if body.op == "ai":   # AI 代劳入队即返回，进度经会话状态轮询（可能跑很久且可取消）
+        return start_ai_cmd(sid, body.model_dump())
+    return send_cmd(sid, body.model_dump(), timeout=35.0)
+
+
+@router.post("/cases/ui-record/{sid}/cancel-ai")
+def ui_record_cancel_ai(sid: str, user: User = Depends(current_user)):
+    """中止当前 AI 代劳轮（录制线程在步骤间检查取消标记后退出）。"""
+    from ..engine.ui_recorder import cancel_ai
+    return cancel_ai(sid)
 
 
 @router.get("/cases/ui-record/{sid}")

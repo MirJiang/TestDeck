@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed, onBeforeUnmount } from 'vue'
+import { ref, computed, nextTick, onBeforeUnmount } from 'vue'
 import { api, getToken } from '../api'
+import { confirmDialog } from '../dialog'
 
 // 可视化录制弹窗：
 //  - remote 模式：页面画面串流进来，直接在这里点击/输入/跳转，操作即被录成步骤（远程与容器部署可用）
@@ -11,6 +12,7 @@ const props = defineProps({
   title: { type: String, default: '录制 UI 用例' },
   roleNote: { type: String, default: '' },   // 流程测试里为某个角色录制时的提示
   envs: { type: Array, default: () => [] },  // 可选：注入 AI 代劳的环境变量（选中的环境）
+  presetVars: { type: Object, default: () => ({}) },  // 额外注入 AI 代劳的变量（用例账号/流程角色变量），优先于环境变量
 })
 const emit = defineEmits(['done', 'close'])
 
@@ -25,17 +27,29 @@ const busy = ref(false)
 const stepN = ref(0)
 const fillSel = ref('')
 const fillVal = ref('')
+const liveSteps = ref([])   // 录制中实时编译出的步骤（随轮询刷新）
+const stepsBox = ref(null)
+const STEP_LABELS = { goto: '打开', click: '点击', fill: '输入', expect_text: '断言文本', click_xy: '点选坐标', drag: '拖拽', ai: 'AI 代劳' }
+const stepDetail = (s) => s.action === 'goto' ? s.url
+  : s.action === 'fill' ? `${s.selector} = ${s.value}`
+  : (s.action === 'click_xy' || s.action === 'drag') ? s.value
+  : (s.selector || s.value)
 let frameTimer = null
 let pollTimer = null
+let ws = null
+let wsRetried = false
 let finished = false
 
 // ---- AI 代劳（混合录制） ----
 const aiGoal = ref('')
+const aiMax = ref(200)    // AI 代劳步数上限：录制有人盯守且可随时停止，默认放到接近不限
 const aiEnvId = ref('')
 const aiRunning = ref(false)
 const aiGoals = []   // 本次录制中 AI 代劳的目标（录完增强时作为语境传给模型）
-const aiVars = computed(() =>
-  (props.envs.find(e => e.id === aiEnvId.value) || props.envs[0] || {}).variables || {})
+const aiVars = computed(() => ({
+  ...((props.envs.find(e => e.id === aiEnvId.value) || props.envs[0] || {}).variables || {}),
+  ...props.presetVars,
+}))
 
 // ---- 录完 review（AI 增强断言） ----
 const rawSteps = ref([])
@@ -49,6 +63,8 @@ async function start(mode) {
   errMsg.value = ''
   const r = await api('/cases/ui-record/start?url=' + encodeURIComponent(u) + '&mode=' + mode, { method: 'POST' })
   sess.value = r.session
+  liveSteps.value = []
+  stepN.value = 0
   if (mode === 'local') {
     stage.value = 'localwait'
     pollTimer = setInterval(checkDone, 2000)
@@ -56,8 +72,30 @@ async function start(mode) {
     stage.value = 'rec'
     addr.value = u
     pageUrl.value = u
-    frameTimer = setInterval(pullFrame, 400)
+    wsRetried = false
+    connectStream()
     pollTimer = setInterval(checkDone, 2500)
+  }
+}
+
+// Screencast 推流：页面重绘后端即推送新帧（WebSocket），无变化不推。
+// 连不上时自动重试一次，仍失败退回 400ms 轮询（/frame 接口保留兼容）。
+function connectStream() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  ws = new WebSocket(`${proto}://${location.host}/api/v1/cases/ui-record/${sess.value}/stream?token=${getToken()}`)
+  ws.binaryType = 'blob'
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {   // 控制信号：会话结束/消失，交给状态轮询收尾
+      try { JSON.parse(e.data).done && checkDone() } catch { /* 忽略 */ }
+      return
+    }
+    if (frameUrl.value) URL.revokeObjectURL(frameUrl.value)
+    frameUrl.value = URL.createObjectURL(e.data)
+  }
+  ws.onclose = () => {
+    if (finished || stage.value !== 'rec') return
+    if (!wsRetried) { wsRetried = true; setTimeout(connectStream, 800) }
+    else if (!frameTimer) frameTimer = setInterval(pullFrame, 400)
   }
 }
 
@@ -78,6 +116,19 @@ async function checkDone() {
   try {
     const s = await api('/cases/ui-record/' + sess.value)
     stepN.value = s.steps.length
+    liveSteps.value = s.steps
+    nextTick(() => { const el = stepsBox.value; if (el) el.scrollTop = el.scrollHeight })
+    // AI 代劳收尾：启动即返回的指令靠这里看结果（passed / failed / cancelled）
+    const ai = s.ai
+    if (ai && ai.state === 'running') {
+      aiRunning.value = true
+    } else if (aiRunning.value) {
+      aiRunning.value = false
+      if (ai.state === 'passed') { aiGoals.push(ai.goal); aiGoal.value = '' }
+      else errMsg.value = ai.state === 'cancelled'
+        ? '已停止 AI 代劳，画面停留在它操作到的地方，可继续手动录制'
+        : (ai.summary || 'AI 未完成目标，画面停留在它操作到的地方，可继续手动录制')
+    }
     if (s.done) await stopToReview()   // local：用户关窗；remote：会话异常终止
   } catch { /* 忽略轮询错误 */ }
 }
@@ -120,18 +171,17 @@ async function doGoto() {
 }
 
 async function doAi() {
-  if (!aiGoal.value.trim() || busy.value) return
+  if (!aiGoal.value.trim() || busy.value || aiRunning.value) return
   errMsg.value = ''
-  aiRunning.value = true
-  const r = await cmd({ op: 'ai', goal: aiGoal.value.trim(), vars: aiVars.value, max_steps: 12 }, 300000)
-  aiRunning.value = false
-  if (r.ok) {
-    aiGoals.push(aiGoal.value.trim())
-    aiGoal.value = ''
-    stepN.value += r.ai_steps || 0
-  } else {
-    errMsg.value = r.error || 'AI 未完成目标，画面停留在它操作到的地方，可继续手动录制'
-  }
+  // 入队即返回：AI 执行可能很久，进度/结果由 checkDone 轮询会话状态收尾
+  const r = await cmd({ op: 'ai', goal: aiGoal.value.trim(), vars: aiVars.value,
+                        max_steps: Math.min(999, Math.max(1, parseInt(aiMax.value) || 200)) })
+  if (r.ok) aiRunning.value = true
+  else errMsg.value = r.error
+}
+
+async function cancelAi() {
+  try { await api(`/cases/ui-record/${sess.value}/cancel-ai`, { method: 'POST' }) } catch { /* 会话可能已结束 */ }
 }
 
 // ---- 完成 → review ----
@@ -139,6 +189,7 @@ async function stopToReview() {
   if (finished) return
   finished = true
   clearInterval(frameTimer); clearInterval(pollTimer)
+  if (ws) { try { ws.close() } catch { /* 已关闭 */ } ws = null }
   const s = await api('/cases/ui-record/' + sess.value)
   rawSteps.value = s.steps
   stepN.value = s.steps.length
@@ -156,15 +207,30 @@ async function doEnhance() {
 
 function use(steps) { emit('done', steps) }
 
+// 放弃录制须显式确认：误触（如点到遮罩空白处）绝不丢步骤——遮罩不响应点击
+async function abandon() {
+  const n = liveSteps.value.length || rawSteps.value.length
+  if (n && !await confirmDialog(`放弃本次录制？已录的 ${n} 步将不会保留。`, { danger: true, okText: '放弃' })) return
+  emit('close')
+}
+
 onBeforeUnmount(() => {
+  // 关闭弹窗时若 AI 还在跑，尽力通知后端中止（否则它会继续消耗 token 到步数上限）
+  if (aiRunning.value && sess.value) {
+    try {
+      fetch('/api/v1/cases/ui-record/' + sess.value + '/cancel-ai',
+        { method: 'POST', headers: { Authorization: 'Bearer ' + getToken() }, keepalive: true })
+    } catch { /* 已离开 */ }
+  }
   finished = true
   clearInterval(frameTimer); clearInterval(pollTimer)
+  if (ws) { try { ws.close() } catch { /* 已关闭 */ } ws = null }
   if (frameUrl.value) URL.revokeObjectURL(frameUrl.value)
 })
 </script>
 
 <template>
-  <div class="mask rec on" @click.self="emit('close')">
+  <div class="mask rec on">
     <div class="modal rec-box">
       <h3>{{ title }}<span v-if="roleNote" class="muted" style="font-weight:400"> · {{ roleNote }}</span></h3>
 
@@ -187,7 +253,20 @@ onBeforeUnmount(() => {
         <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
           <span class="st run"><span class="spin"></span>录制中</span>
           <span class="mono muted">已录 {{ stepN }} 步</span>
-          <button class="btn" style="margin-left:auto" @click="emit('close')">放弃</button>
+          <button class="btn" style="margin-left:auto" @click="abandon">放弃</button>
+        </div>
+        <div class="rec-steps" style="margin-top:12px">
+          <div class="rec-steps-tt">已录步骤（实时）</div>
+          <div ref="stepsBox" class="rec-steps-bd">
+            <div v-for="(s, i) in liveSteps" :key="i" class="rec-step">
+              <span class="n">{{ i + 1 }}</span>
+              <span class="a">{{ STEP_LABELS[s.action] || s.action }}</span>
+              <span class="d" :title="stepDetail(s)">{{ stepDetail(s) }}</span>
+            </div>
+            <div v-if="!liveSteps.length" class="faint" style="padding:8px 11px;font-size:12px">
+              在弹出的浏览器窗口里的操作会实时出现在这里
+            </div>
+          </div>
         </div>
       </template>
 
@@ -210,6 +289,7 @@ onBeforeUnmount(() => {
           <button v-if="!enh || !enh.enhanced" class="btn" :disabled="enhancing || !rawSteps.length" @click="doEnhance">
             {{ enhancing ? 'AI 分析中…' : 'AI 补充断言（可反复用）' }}</button>
           <span style="flex:1"></span>
+          <button class="btn" @click="abandon">放弃</button>
           <button class="btn" @click="use(rawSteps)">使用原始步骤</button>
           <button v-if="enh && enh.enhanced" class="btn pri" @click="use(enh.steps)">使用增强结果</button>
         </div>
@@ -224,20 +304,39 @@ onBeforeUnmount(() => {
           <button class="btn sm" :disabled="busy" @click="cmd({ op: 'scroll', dy: 360 })">↓</button>
           <span class="mono muted">已录 {{ stepN }} 步</span>
           <button class="btn pri sm" :disabled="busy" @click="cmd({ op: 'finish' }).then(stopToReview)">完成录制</button>
+          <button class="btn sm" :disabled="busy" @click="abandon">放弃</button>
         </div>
         <div class="rec-tools" style="margin-top:8px">
           <span class="muted" style="font-size:12.5px;white-space:nowrap">AI 代劳</span>
           <input v-model="aiGoal" style="flex:1;min-width:240px"
             placeholder="这一步让 AI 做，如：用 ${'{'}username{'}'} 登录，看到欢迎页为止" @keyup.enter="doAi">
+          <span class="faint" style="font-size:12px;white-space:nowrap" title="AI 代劳单轮最多执行的步数（防失控）">步数上限</span>
+          <input v-model.number="aiMax" type="number" min="1" max="999" class="mono" style="width:64px" :disabled="busy">
           <select v-if="envs.length" v-model="aiEnvId" :disabled="busy" style="width:auto">
             <option v-for="e in envs" :key="e.id" :value="e.id">{{ e.name }}</option>
           </select>
-          <button class="btn sm pri" :disabled="busy || !aiGoal.trim()" @click="doAi">
+          <button class="btn sm pri" :disabled="busy || aiRunning || !aiGoal.trim()" @click="doAi">
             {{ aiRunning ? 'AI 操作中…' : '让 AI 做' }}</button>
+          <button class="btn sm" v-if="aiRunning" @click="cancelAi">停止 AI</button>
         </div>
-        <div class="rec-shot" :class="{ busy }">
-          <img v-if="frameUrl" :src="frameUrl" @click="onImgClick" @wheel="onWheel" draggable="false" alt="录制画面">
-          <div v-else class="empty" style="padding:80px 0">正在连接页面…</div>
+        <div class="rec-live">
+          <div class="rec-shot" :class="{ busy }">
+            <img v-if="frameUrl" :src="frameUrl" @click="onImgClick" @wheel="onWheel" draggable="false" alt="录制画面">
+            <div v-else class="empty" style="padding:80px 0">正在连接页面…</div>
+          </div>
+          <div class="rec-steps-side">
+            <div class="rec-steps-tt">已录步骤 <b class="mono">{{ liveSteps.length }}</b></div>
+            <div ref="stepsBox" class="rec-steps-bd">
+              <div v-for="(s, i) in liveSteps" :key="i" class="rec-step">
+                <span class="n">{{ i + 1 }}</span>
+                <span class="a">{{ STEP_LABELS[s.action] || s.action }}</span>
+                <span class="d" :title="stepDetail(s)">{{ stepDetail(s) }}</span>
+              </div>
+              <div v-if="!liveSteps.length" class="faint" style="padding:8px 11px;font-size:12px">
+                在画面上的每次点击、输入都会实时出现在这里
+              </div>
+            </div>
+          </div>
         </div>
         <div v-if="fillSel" class="rec-fill">
           <span class="sel">{{ fillSel }}</span>

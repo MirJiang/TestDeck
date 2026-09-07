@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..db import get_db
-from ..models import User, Project, Env, ProjectMember
+from ..models import User, Project, Env, ProjectMember, ProjectUser
 from ..auth import current_user
 from ..perms import check_project_access, accessible_project_ids
 
@@ -77,7 +77,9 @@ def list_envs(pid: str, db: Session = Depends(get_db), user: User = Depends(curr
 @router.post("/{pid}/envs")
 def create_env(pid: str, body: EnvIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
     check_project_access(pid, user, db)
-    e = Env(project_id=pid, name=body.name, base_url=body.base_url, variables=body.variables)
+    if db.query(Env).filter(Env.project_id == pid).count():
+        raise HTTPException(400, "一个项目只保留一个环境地址，请直接编辑现有环境")
+    e = Env(project_id=pid, name=body.name or "default", base_url=body.base_url, variables=body.variables)
     db.add(e); db.commit()
     return {"id": e.id}
 
@@ -101,6 +103,89 @@ def delete_env(pid: str, eid: str, db: Session = Depends(get_db), user: User = D
         raise HTTPException(404, "环境不存在")
     db.delete(e); db.commit()
     return {"ok": True}
+
+
+# ---------- 项目测试用户（账号密码池：用例/流程角色选择带出） ----------
+
+class ProjectUserIn(BaseModel):
+    name: str = ""
+    username: str
+    password: str = ""
+    remark: str = ""
+
+
+class ImportIn(BaseModel):
+    text: str
+
+
+@router.get("/{pid}/users")
+def list_project_users(pid: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    check_project_access(pid, user, db)
+    return [{"id": u.id, "name": u.name, "username": u.username, "password": u.password,
+             "remark": u.remark} for u in
+            db.query(ProjectUser).filter(ProjectUser.project_id == pid).order_by(ProjectUser.created_at)]
+
+
+@router.post("/{pid}/users")
+def add_project_user(pid: str, body: ProjectUserIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    check_project_access(pid, user, db)
+    u = ProjectUser(project_id=pid, name=body.name, username=body.username,
+                    password=body.password, remark=body.remark)
+    db.add(u); db.commit()
+    return {"id": u.id}
+
+
+@router.put("/{pid}/users/{uid}")
+def update_project_user(pid: str, uid: str, body: ProjectUserIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    check_project_access(pid, user, db)
+    u = db.get(ProjectUser, uid)
+    if not u or u.project_id != pid:
+        raise HTTPException(404, "用户不存在")
+    u.name, u.username, u.password, u.remark = body.name, body.username, body.password, body.remark
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/{pid}/users/{uid}")
+def del_project_user(pid: str, uid: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    check_project_access(pid, user, db)
+    u = db.get(ProjectUser, uid)
+    if not u or u.project_id != pid:
+        raise HTTPException(404, "用户不存在")
+    db.delete(u); db.commit()
+    return {"ok": True}
+
+
+@router.post("/{pid}/users/import")
+def import_project_users(pid: str, body: ImportIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """批量导入：每行一个用户，逗号/制表符分隔。两列=账号,密码；三列=名称,账号,密码。
+    账号已存在则更新（幂等）。返回 {added, updated, skipped}。"""
+    check_project_access(pid, user, db)
+    added = updated = skipped = 0
+    exist = {u.username: u for u in db.query(ProjectUser).filter(ProjectUser.project_id == pid)}
+    for ln in (body.text or "").splitlines():
+        parts = [p.strip() for p in ln.replace("，", ",").replace("\t", ",").split(",")]
+        parts = [p for p in parts if p]
+        if not parts:
+            continue
+        if len(parts) == 1:
+            skipped += 1
+            continue
+        if len(parts) == 2:
+            name, uname, pwd = "", parts[0], parts[1]
+        else:
+            name, uname, pwd = parts[0], parts[1], parts[2]
+        if uname in exist:
+            u = exist[uname]
+            u.name, u.password = name or u.name, pwd
+            updated += 1
+        else:
+            u = ProjectUser(project_id=pid, name=name, username=uname, password=pwd)
+            db.add(u)
+            exist[uname] = u
+            added += 1
+    db.commit()
+    return {"added": added, "updated": updated, "skipped": skipped}
 
 
 # ---------- 成员 ----------
