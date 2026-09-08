@@ -1,9 +1,9 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, watch, onMounted } from 'vue'
 import { api } from '../api'
 import CaseEditor from '../components/CaseEditor.vue'
 import RunDrawer from '../components/RunDrawer.vue'
-import AiDrawer from '../components/AiDrawer.vue'
+import RecorderModal from '../components/RecorderModal.vue'
 import { confirmDialog, alertDialog, toast } from '../dialog'
 
 const projects = ref([])
@@ -14,7 +14,6 @@ const editing = ref(null)
 const running = ref(null)
 const envs = ref([])
 const err = ref('')
-const aiOpen = ref(false)
 const nlShow = ref(false)
 // ---- HAR / Postman 存量资产导入 ----
 const impOpen = ref(false)
@@ -42,23 +41,37 @@ async function doImport() {
     load()
   } catch (e) { impErr.value = e.message } finally { impBusy.value = false }
 }
-const nlPrompt = ref('')
-const nlDraft = ref(null)
-const nlLoading = ref(false)
-const nlErr = ref('')
+// ---- AI 现场生成用例：选账号 → 填目标 → 打开录制弹窗让 AI 现场执行，全程可视、步骤实时记录 ----
+const nlForm = ref({ userId: '', url: '', goal: '' })
+const nlRec = ref(null)          // 活动的现场会话 {url, goal, username, password}
+const pusers = ref([])
+watch(pid, async v => { pusers.value = v ? await api(`/projects/${v}/users`).catch(() => []) : [] }, { immediate: true })
 
-async function nlGen() {
-  if (!nlPrompt.value.trim()) return
-  nlLoading.value = true; nlErr.value = ''; nlDraft.value = null
-  try { nlDraft.value = (await api('/ai/gen-from-text',
-    { method: 'POST', body: { project_id: pid.value, prompt: nlPrompt.value } })).draft }
-  catch (e) { nlErr.value = e.message } finally { nlLoading.value = false }
+function openNl() {
+  nlForm.value = { userId: '', url: envs.value[0]?.base_url || '', goal: '' }
+  nlShow.value = true
 }
 
-async function nlSave() {
-  await api(`/projects/${pid.value}/cases`, { method: 'POST',
-    body: { project_id: pid.value, name: nlDraft.value.name, steps: nlDraft.value.steps, source: 'ai' } })
-  nlShow.value = false; nlPrompt.value = ''; nlDraft.value = null; load()
+function startNlLive() {
+  const goal = nlForm.value.goal.trim()
+  if (!goal) { toast('先告诉 AI 要测什么'); return }
+  if (!nlForm.value.url.trim().startsWith('http')) { toast('先填被测页面地址'); return }
+  const u = pusers.value.find(x => x.id === nlForm.value.userId)
+  nlRec.value = { url: nlForm.value.url.trim(), goal,
+                  username: u?.username || '', password: u?.password || '' }
+  nlShow.value = false
+}
+
+function onNlDone(steps) {
+  const r = nlRec.value
+  const base = (envs.value[0]?.base_url || '').replace(/\/+$/, '')
+  let start = r.url
+  if (base && start.startsWith(base)) start = start.slice(base.length) || '/'   // 起始页面只存路径
+  editing.value = { id: '', project_id: pid.value, name: r.goal.slice(0, 24), type: 'ai', target: 'ui',
+    goal: r.goal, start_url: start, engine: '', max_steps: 30,
+    fixedSteps: steps, username: r.username, password: r.password, source: 'ai' }
+  nlRec.value = null
+  toast('AI 现场执行完成，已带出用例——确认无误后点「保存用例」', 4000)
 }
 
 onMounted(async () => {
@@ -120,8 +133,7 @@ const filtered = () => list.value.filter(c => c.name.includes(q.value.trim()))
 <template>
   <div class="hd"><div><h2>用例</h2></div>
     <div style="display:flex;gap:8px">
-      <button class="btn" @click="nlShow = true" :disabled="!pid">AI · 说句话生成</button>
-      <button class="btn" @click="aiOpen = true">AI · 从提交生成</button>
+      <button class="btn" @click="openNl" :disabled="!pid">AI · 现场生成用例</button>
       <button class="btn" @click="impOpen = true" :disabled="!pid">导入 HAR/Postman</button>
       <button class="btn pri" @click="openNew" :disabled="!pid">新建用例</button>
     </div></div>
@@ -163,8 +175,6 @@ const filtered = () => list.value.filter(c => c.name.includes(q.value.trim()))
   <CaseEditor v-if="editing" v-model="editing" @save="save" @close="editing = null" />
   <RunDrawer v-if="running" :title="running.title" :caseId="running.caseId" :caseType="running.caseType" :envs="envs"
     @close="running = null" @done="load" />
-  <AiDrawer v-if="aiOpen" :projects="projects" @close="aiOpen = false" @done="load" @saved="load" />
-
   <!-- 存量资产导入：HAR / Postman Collection -->
   <div class="mask" :class="{ on: impOpen }" @click.self="impOpen = false">
     <div class="modal" style="width:620px" v-if="impOpen">
@@ -189,23 +199,29 @@ const filtered = () => list.value.filter(c => c.name.includes(q.value.trim()))
     </div>
   </div>
 
+  <!-- AI 现场生成用例：预填表单（选账号/地址/目标）→ 录制弹窗里 AI 现场执行 -->
   <div class="mask" :class="{ on: nlShow }" @click.self="nlShow = false">
     <div class="modal">
-      <h3>AI · 说句话生成用例</h3>
-      <div class="fld"><label>想测什么？用大白话描述</label>
-        <textarea v-model="nlPrompt" rows="3" placeholder="例如：测一下登录接口 /api/login，账号密码正确时应该返回 code=0"></textarea></div>
-      <button class="btn pri" :disabled="nlLoading" @click="nlGen">{{ nlLoading ? '生成中…' : '生成草稿' }}</button>
-      <div v-if="nlErr" style="color:var(--err);margin-top:10px">{{ nlErr }}</div>
-      <div v-if="nlDraft" class="panel" style="margin-top:14px;margin-bottom:0;background:#fcfcfd">
-        <div style="font-size:13.5px"><b>{{ nlDraft.name }}</b></div>
-        <div class="muted" style="font-size:12.5px;margin:6px 0">{{ nlDraft.reason }}</div>
-        <div v-for="(s, i) in nlDraft.steps" :key="i" class="mono muted" style="font-size:12px">
-          {{ i + 1 }}. {{ s.m }} {{ s.url }} · 检查：{{ s.check?.type }} {{ s.check?.expect || s.check?.field || '' }}</div>
-        <div style="margin-top:10px;display:flex;gap:8px">
-          <button class="btn sm pri" @click="nlSave">保存为用例</button>
-          <button class="btn sm" @click="nlGen">重新生成</button>
-        </div>
+      <h3>AI · 现场生成用例</h3>
+      <div class="fld"><label>测试账号（项目用户列表，可改）</label>
+        <select v-model="nlForm.userId">
+          <option value="">— 不使用账号 —</option>
+          <option v-for="u in pusers" :key="u.id" :value="u.id">{{ u.name ? `${u.name}（${u.username}）` : u.username }}</option>
+        </select></div>
+      <div class="fld"><label>被测页面地址</label>
+        <input v-model="nlForm.url" class="mono" placeholder="https://test.example.com/login"></div>
+      <div class="fld"><label>要让 AI 做什么？（大白话，可引用 $&#123;username&#125; $&#123;password&#125;）</label>
+        <textarea v-model="nlForm.goal" rows="3" placeholder="用 ${username} 登录，创建一张从上海到北京的询价单，页面应提示创建成功"></textarea></div>
+      <div class="faint" style="font-size:12px;margin:-4px 0 10px">
+        点击开始后会打开录制画面：AI 现场执行目标、每步实时记录，你全程可视、可随时停止或接着手动录。
       </div>
+      <div class="ft"><button class="btn" @click="nlShow = false">取消</button>
+        <button class="btn pri" @click="startNlLive">开始（AI 现场执行）</button></div>
     </div>
   </div>
+
+  <RecorderModal v-if="nlRec" title="AI 现场生成用例" :envs="envs"
+    :initial-url="nlRec.url" :auto-start="true" :auto-goal="nlRec.goal"
+    :preset-vars="{ username: nlRec.username, password: nlRec.password }"
+    @done="onNlDone" @close="nlRec = null" />
 </template>

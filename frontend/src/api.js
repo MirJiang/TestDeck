@@ -7,7 +7,11 @@ export function setAuth(token, user) {
   localStorage.setItem(TOKEN_KEY, token)
   localStorage.setItem(USER_KEY, JSON.stringify(user))
 }
-export function clearAuth() { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY) }
+export function clearAuth() {
+  localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(USER_KEY)
+  // 登录时后端同步下发的 td_token Cookie（/static 截图鉴权用）一并清掉
+  document.cookie = 'td_token=; Max-Age=0; path=/'
+}
 
 export async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) }

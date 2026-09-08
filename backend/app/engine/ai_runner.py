@@ -15,6 +15,7 @@ from pathlib import Path
 import httpx
 
 from .. import ai as A
+from .. import config
 from .runner import substitute, evaluate_check, get_field
 from .ui_runner import STATIC_DIR
 from .browser import launch_browser
@@ -322,13 +323,16 @@ _SYSTEM = (
 )
 
 
-def _build_prompt(goal: str, variables: dict, history: list, state: dict, vision: bool = False) -> str:
+def _build_prompt(goal: str, variables: dict, history: list, state: dict,
+                  vision: bool = False, page_map: str = "") -> str:
     els = "; ".join(f"{e['selector']}({e['tag']}「{e['text']}」)" for e in state.get("elements", [])[:40])
     var = "; ".join(f"${k}={v}" for k, v in variables.items()) or "无"
     hist = "; ".join(history[-12:]) or "无"
     p = (f"测试目标：{goal}\n可用变量：{var}\n已执行动作：{hist}\n"
          f"当前页面：{state.get('url', '')}「{state.get('title', '')}」\n"
          f"可交互元素：{els or '无'}\n页面文字：{state.get('text', '')}")
+    if page_map:
+        p += f"\n\n{page_map}"   # 应用地图先验知识：页面关系与按钮清单
     if vision:
         p += f"\n附有当前页面截图，尺寸 {state.get('vw', 0)}x{state.get('vh', 0)}，坐标原点为左上角。"
     return p
@@ -396,17 +400,34 @@ def _model_hint() -> str:
 
 
 def ai_drive(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEPS,
-             run_id: str = "", shot_tag: str = "ai", on_step=None, engine: str = "") -> dict:
+             run_id: str = "", shot_tag: str = "ai", on_step=None, engine: str = "",
+             page_map: str = "", project_id: str = "") -> dict:
     """同步驱动：返回 {status, pass_n, fail_n, detail, saved, summary}。须在执行队列线程调用。
+
+    对外门面（批次 B）：.env 配 TD_BRAIN=agentscope 时委托 AgentScope ReAct agent
+    （brain_agentscope.run_brain），否则走下方手搓循环（B4 基准对比期间保留，对比完成后删除）。
+    两条路径返回结构完全一致，所有调用方零改动。
 
     on_step(detail_list)：每执行完一步回调一次，调用方可把进度增量写入数据库实现流式展示。
     engine 会被标注到首个步骤明细，供前端展示本次用的浏览器引擎。
+    project_id 非空时启用执行比对信号：每步把当前页与应用地图（期望基线）比对，地图记录的
+    按钮缺失就在该步明细记 warning——不判失败、不计入 pass_n/fail_n、不回写地图。
     """
+    if (config.get("TD_BRAIN") or "legacy").strip().lower() in ("agentscope", "as"):
+        from .brain_agentscope import run_brain
+        r = run_brain(page, goal, variables, max_steps=max_steps, run_id=run_id,
+                      shot_tag=shot_tag, on_step=on_step, engine=engine,
+                      page_map=page_map, project_id=project_id)
+        r.pop("brain", None)     # 内部标注不进执行明细契约
+        r.pop("usage", None)     # 用量已经 on_usage 实时写入 llm_logs
+        return r
+
     detail, saved, history = [], {}, []
     pass_n = fail_n = bad = 0
     t0 = time.time()
     summary = ""
     last_fail_key, same_fail = None, 0
+    last_warn = ""   # 同一缺失集合只在变化时报一次，避免每步刷屏
     use_vision = A.vision_enabled()   # 使用中的模型勾选了视觉才发截图（省 token）
 
     def _emit():
@@ -448,6 +469,17 @@ def ai_drive(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEP
             state = page.evaluate(_STATE_JS)
         except Exception as e:
             state = {"url": "", "title": "", "elements": [], "text": f"页面状态读取失败：{e}"}
+        # 执行比对信号：地图（期望基线）记录的按钮在当前页 DOM 缺失 → 本步记警告（元素级回归检测）
+        step_warn = ""
+        if project_id:
+            try:
+                from .app_mapper import map_gaps
+                w = map_gaps(project_id, state.get("url", ""), page)
+            except Exception:
+                w = ""
+            if w != last_warn:
+                step_warn = w
+            last_warn = w
         image_b64 = None
         system = _SYSTEM
         if use_vision:
@@ -456,7 +488,7 @@ def ai_drive(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEP
                 system = _SYSTEM + _SYSTEM_VISION
             except Exception:
                 image_b64 = None  # 截图失败（如 Lightpanda 不支持）退回纯文本决策
-        act = A.chat_json_sync(system, _build_prompt(goal, variables, history, state, bool(image_b64)),
+        act = A.chat_json_sync(system, _build_prompt(goal, variables, history, state, bool(image_b64), page_map),
                                kind="agent-step", image_b64=image_b64)
         if not act or not act.get("action"):
             bad += 1
@@ -471,6 +503,8 @@ def ai_drive(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEP
         bad = 0
         op = act["action"]
         entry = {"idx": i, "action": op, "think": (act.get("think") or "")[:120], "ms": 0}
+        if step_warn:
+            entry["warning"] = step_warn
         if op == "done":
             ok = bool(act.get("pass", True))
             entry.update(target="", **{"pass": ok}, reason=(act.get("reason") or "模型判定完成")[:300])
@@ -594,8 +628,11 @@ def run_ai_case(case, env, run_id: str, on_step=None) -> dict:
                 on_step([dict(note_entry)])
         else:
             detail = []
+        from .app_mapper import app_map_brief
         r = ai_drive(page, goal, variables, max_steps=max_steps, run_id=run_id,
-                     on_step=on_step, engine=used)
+                     on_step=on_step, engine=used,
+                     page_map=app_map_brief(getattr(case, "project_id", "")),
+                     project_id=getattr(case, "project_id", "") or "")
         if detail:  # 把 note 并进结果明细头部（idx 保持 ai_drive 的编号可读性）
             r["detail"] = detail + r["detail"]
             r["pass_n"] += 1

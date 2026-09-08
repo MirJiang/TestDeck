@@ -53,17 +53,21 @@ async function exportHtml() {
               <span v-if="s.role_name" class="chip">{{ s.role_name }}</span>
               <span class="mono" style="font-size:12.5px">{{ s.m || s.action || s.type }} {{ s.url || s.target }}</span>
               <span v-if="s.saved" class="chip">已记住 {{ s.saved }}</span>
+              <span v-if="s.warning" class="chip" style="color:var(--warn,#b8860b);border-color:currentColor" :title="s.warning">⚠ 地图比对</span>
             </div>
             <div class="muted" style="font-size:12.5px;margin-top:6px">{{ s.pass ? '✓' : '✗' }} {{ s.reason }}</div>
+            <div v-if="s.warning" style="font-size:12px;margin-top:4px;color:var(--warn,#b8860b)">⚠ {{ s.warning }}</div>
             <div v-if="!s.pass && s.response" class="mono" style="font-size:11.5px;margin-top:6px;color:var(--err);word-break:break-all">{{ s.response?.slice(0, 400) }}</div>
             <div v-if="s.actions?.length" style="margin-top:8px;border-left:2px solid var(--line);padding-left:10px">
               <div v-for="(a, j) in s.actions" :key="j" style="display:flex;gap:7px;align-items:baseline;font-size:12px;padding:2px 0">
                 <span :style="{ color: a.pass ? 'var(--ok)' : 'var(--err)' }">{{ a.pass ? '✓' : '✗' }}</span>
                 <span class="mono" style="word-break:break-all">{{ a.m || a.action || a.type }} {{ a.url || a.target || '' }}</span>
                 <span class="faint" style="font-size:11.5px">{{ a.reason }}</span>
+                <span v-if="a.warning" style="font-size:11.5px;color:var(--warn,#b8860b)" :title="a.warning">⚠ {{ a.warning }}</span>
               </div>
             </div>
             <img v-if="s.screenshot" :src="s.screenshot" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:6px;margin-top:8px">
+            <video v-if="s.video" :src="s.video" controls style="max-width:100%;border:1px solid var(--line);border-radius:6px;margin-top:8px"></video>
             <div v-if="s.diff" style="margin-top:8px">
               <div class="muted" style="font-size:12px;margin-bottom:4px">基线（左）与本次（右）对比：</div>
               <img :src="s.diff" loading="lazy" style="max-width:100%;border:1px solid var(--err);border-radius:6px">

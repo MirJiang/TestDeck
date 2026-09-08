@@ -21,6 +21,8 @@
 | 通知 | 执行失败自动推送钉钉/企微群机器人，支持测试发送 |
 | 模型配置 | 界面化管理多家厂商模型（国内外 19 家预置 + 自定义），区分按量 API / Token 套餐接入，在线拉取模型列表，连接测试，保存即生效 |
 | 报告导出 | 单次执行导出独立 HTML 报告；执行记录导出 CSV |
+| MCP 服务 | 平台能力暴露为 MCP 工具（`/mcp`，Streamable HTTP）：外部 AI agent 带平台 token 即可查项目/用例、跑测试、看结果、上传应用地图、**借受控浏览器会话干活**（白名单动作，无 shell/文件能力） |
+| 应用地图 | **期望基线**（只由扫描/源码分析/人工写入，执行观察不回写）：多角色扫描合并按角色可见性、元素带来源（扫描/源码/人工）与状态备注；AI 执行时每步比对，地图按钮缺失记**警告**（元素级回归信号，不判失败） |
 | 回归建议 | 工作台提示超 14 天未执行的用例与近 7 天新提交 |
 | 运维 | 截图 30 天自动清理（`TD_KEEP_DAYS`）；LLM 调用与 token 用量记录 |
 
@@ -36,7 +38,10 @@ FastAPI 后端（uvicorn，单进程）
    │    ├─ runner.py       API 用例：变量替换 → httpx → 检查点 → 记住返回值
    │    ├─ ui_runner.py    UI 用例：Playwright 无头浏览器动作编排
    │    ├─ flow_runner.py  流程测试：多角色 API client / 浏览器 context 隔离
-   │    ├─ ai_runner.py    AI 用例：页面状态(+截图) → 大模型决策 → 执行动作 循环
+   │    ├─ ai_runner.py    AI 用例门面：ai_drive 按 TD_BRAIN 分派新旧决策循环
+   │    ├─ brain_agentscope.py  AgentScope Brain：ReAct agent + 白名单工具集 + 多模型回退链
+   │    ├─ app_mapper.py   应用地图：多角色爬取合并 / 执行比对信号 / upsert 合并写入
+   │    ├─ browser_sessions.py  MCP 浏览器会话：外部 agent 借受控页面干活（独占线程+命令泵）
    │    ├─ ui_recorder.py  录制：remote 画面串流 / local 弹窗浏览器
    │    ├─ browser.py      引擎选择：Chromium Headless Shell / Lightpanda(CDP)
    │    └─ queue.py        执行队列：TD_WORKERS 可配并发（默认 1 保持串行；SQLite 已配 busy_timeout）
@@ -50,7 +55,7 @@ FastAPI 后端（uvicorn，单进程）
 
 - **执行队列（默认串行，可开并发）**：所有测试提交到同一个线程池，默认 1 个 worker 天然串行——避免并发写冲突，也杜绝跨线程事件循环问题。团队规模上来后 `.env` 设 `TD_WORKERS=N`（≤16）开启并发执行；SQLite 已配 `busy_timeout`，多 worker 写锁等待自动重试，生产建议切 PostgreSQL/MySQL。
 - **数据库可插拔**：SQLAlchemy 适配层，默认 SQLite（零配置，本地开发与测试）；生产设 `TD_DATABASE_URL` 一键切 PostgreSQL 或 MySQL（Docker 部署已内置 PostgreSQL 16，健康检查就绪后才启动后端）。`python -m app.cli.db_migrate --to <连接串>` 可把现有 SQLite 数据迁入。
-- **AI 决策循环**：`提取页面状态（可见元素/DOM 文本/可选截图）→ LLM 输出 JSON 动作 → 执行 → 回填历史`，直到模型输出 done、连续 3 次相同动作失败熔断、或达到最大步数。
+- **AI 决策循环（双路径，迁移期共存）**：默认 legacy 手搓循环——`提取页面状态（可见元素/DOM 文本/可选截图）→ LLM 输出 JSON 动作 → 执行 → 回填历史`；`.env` 设 `TD_BRAIN=agentscope` 切 AgentScope ReAct agent（动作注册为白名单工具、done 走结构化输出、多模型回退链）。两条路径经 `ai_drive` 门面统一，返回结构一致、调用方零改动；`benchmark_brain.py` 基准对比达标后 agentscope 转默认并删除旧循环（PLAN 批次 B4）。防失控机制两路一致：连续 3 次相同动作失败熔断、最大步数上限、取消即停、token 用量入 `llm_logs`。
 - **渐进式进度**：AI 用例每执行一步、计划每完成一条用例即增量写库；前端轮询渲染，无需长连接。
 
 ## 3. 目录结构
@@ -64,16 +69,18 @@ backend/
     ai.py              LLM 适配层（配置来源：llm_configs 表 > .env 兜底配置）
     scheduler.py notify.py maintenance.py
     routers/           auth projects cases runs flows plans git ai settings
-    engine/            runner ui_runner flow_runner ai_runner ui_recorder browser queue
+    engine/            runner ui_runner flow_runner ai_runner brain_agentscope app_mapper browser_sessions ui_recorder browser queue
     cli/git_sync.py    内网无 webhook 时同步提交的命令行
+  benchmark_brain.py   新旧 brain 基准对比脚本（PLAN B4：成功率/平均 token/耗时）
   tests/               单元 + 接口测试（test_*.py）、e2e 脚本、mock 被测系统、假 LLM 服务器
   static/              执行截图（30 天自动清理；禁止对外公开）
 frontend/
   src/
-    views/             Login Dash Projects Cases Flows Plans Runs Settings Users LLM
-    components/        CaseEditor RecorderModal RunDrawer ReportDrawer AiDrawer FlowDiagram DialogHost
+    views/             Login Dash Projects Cases Flows Plans Runs Settings Users LLM AppMap
+    components/        CaseEditor RecorderModal RunDrawer ReportDrawer FlowDiagram DialogHost
     dialog.js          全局 Promise 风格弹窗（alert/confirm/prompt/toast）
   api.js main.js       fetch 封装 / 路由
+skills/                交付给外部 agent 的 Skill（app-map-source-scan：源码分析生成地图，经 MCP 上传）
 docs/                  本文档与交互原型（docs/test-platform-ui/index.html）
 ```
 
@@ -98,13 +105,30 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 - **固定步骤**：录制或固化的产物（UI: fixed_steps / API: fixed_api_steps），存在且无 goal 时按步骤原样回放，零 token。
 - 每轮发给模型：目标、可用变量（含角色/共享变量）、最近 12 步历史、可见交互元素（选择器含 id/name/placeholder/type/同标签序号兜底）、页面文字摘要；若模型配置勾选「支持视觉」再附当前视口截图。
 - 模型动作集：`goto / click / click_xy / drag / fill / expect_text / save / done`。
+- **Agent Brain 可切换（`TD_BRAIN`）**：默认 legacy 手搓循环；设 `agentscope` 后 `ai_drive` 委托 AgentScope ReAct agent（`engine/brain_agentscope.py`）——动作集注册为白名单工具（权限引擎 DONT_ASK + ALLOW 规则强制，绝不注册 shell/文件/代码执行类工具）、done 走结构化输出、模型走 llm_configs 多模型回退链（失败自动换下一档）、视觉模式经 `browser_look` 工具按需取截图。执行明细/on_step 流式进度/取消/断路器/token 记账与旧循环完全同构，调用方零改动。
 - 防失控：连续 3 次相同动作失败熔断；最大步数上限；每次执行记录 token 用量。
 - 固化：AI 跑通后可把操作明细转存为普通 UI 用例，回归零 token。
 
 ### 4.4 浏览器引擎
 - 默认 Chromium Headless Shell（Playwright 精简无头内核）。
-- 可选 Lightpanda（AI 原生轻量引擎，beta，内存约为 Chromium 的 1/9）：经 CDP 连接，支持自动拉起进程（`TD_LIGHTPANDA_BIN`）；不可用时自动回退 Chromium，回退信息写入执行明细。**能力自检降级**：执行录像（Screencast）与视觉截图在不支持的引擎上自动跳过、AI 退回纯文本决策，不影响执行；正式支持等上游补齐 Windows 构建与截图能力。
+- 可选 Lightpanda（AI 原生轻量引擎，beta，内存约为 Chromium 的 1/9）：经 CDP 连接，支持自动拉起进程（`TD_LIGHTPANDA_BIN`）；不可用时自动回退 Chromium，回退信息写入执行明细。**视觉能力自检降级**（不影响执行链路）：执行录像（Screencast）、AI 视觉截图（退回纯文本决策）、每步截图留档、截图留档步骤与基线对比（标记跳过而非失败）在不支持的引擎上自动降级；正式支持等上游补齐 Windows 构建与截图能力。
 - 低配部署：`docker-compose.lowmem.yml` 后端镜像不装 Chromium，统一走 Lightpanda 容器。
+
+### 4.4b MCP 服务（外部 AI agent 接入）
+- 官方 MCP SDK（1.x）的 FastMCP 挂载于 `/mcp`（Streamable HTTP），`TD_MCP=0` 可关。
+- 鉴权复用平台 JWT：客户端在 MCP 配置里加请求头 `Authorization: Bearer <登录 token>`，工具按该用户的项目权限执行。
+- 18 个工具：projects_list / project_users_list / cases_list / case_get / runs_list / run_get / case_run / flow_run / case_create / case_delete / ai_usage / **app_map_upsert**（合并写入应用地图，源码分析 Skill 的上传通道）/ **browser_open · browser_state · browser_act · browser_screenshot · browser_sessions · browser_close**（受控浏览器会话：外部 agent 出脑子、平台出手，动作仅限白名单 goto/click/fill/expect_text/click_xy/drag/save，会话独占线程、空闲 30 分钟自动回收、每用户限 2 个/全局限 8 个）；管理面（用户/模型配置）不暴露。
+- 系统设置页「MCP 接入」一键复制完整配置：内含**每个用户自己的长时效专用令牌**（10 年有效、不受登录过期与服务重启影响，权限跟随账号；修改密码后全部令牌自动吊销、重新生成即可）。
+- 接入地址优先取 `TD_PUBLIC_URL`（反向代理场景），未配置时取请求 Host；开发环境经 Vite 代理（/mcp 已配转发）。
+- 注意：客户端所在机器若开有系统代理（Clash 等），需让 localhost 直连（Cursor 等对 localhost 默认直连；Python 客户端设 `NO_PROXY=localhost,127.0.0.1`）。
+
+### 4.4c 应用地图（期望基线 · AI 的系统先验知识）
+- **定位（所有者定调）**：地图 = 期望模型/基线，只由三个来源写入——`scan` 爬取 / `code` 源码分析（skills/app-map-source-scan 经 MCP 上传，ground truth）/ `manual` 人工 upsert；**执行观察永远不回写地图**，否则"本来该有按钮现在没有"的回归信号就消失了。
+- **多角色扫描**：扫描时可勾选多个测试用户，逐个 AI 代劳登录后单独爬取，按 path 合并——页面与元素记录 `roles`（哪些角色见过），按钮"任一角色可点即算可点"。重扫只全量替换 scan 来源的页面/元素，code/manual 来源保留。
+- 产出：页面清单（路径/标题/层级/来源/角色）、每页按钮（含禁用状态、来源、`state_note` 出现条件备注）与链接（跳转关系），存 `app_pages`/`app_elements`。
+- 注入：AI 用例执行、流程 AI 步骤、固定步骤回放的 ai 动作都会把地图摘要注入提示词（页面关系 + 按钮清单 + 条件备注），AI 不再只看当前页盲猜。
+- **执行比对信号（元素级回归检测）**：ai_drive 每步把当前页 DOM 与地图比对，地图记录的按钮缺失时在执行明细记 `warning`（不判失败、不计入通过/失败数；`state_note` 非空的条件性元素跳过比对）；前端执行明细/报告与导出 HTML 展示警告，MCP run_get 原样透出。
+- **upsert 通道**：REST `POST /projects/{pid}/app-map/upsert` 与 MCP `app_map_upsert`（合并写入：页面按 path、元素按 kind+text 同键更新，来源强度 code > manual > scan，不删已有数据）。
 
 ### 4.5 高级断言与视觉回归
 - **JSONPath 断言**：检查点类型选「JSONPath 断言（高级）」，字段写表达式（如 `$.data.list[*].id`）；期望值留空 = 匹配到任意值即通过，填值 = 任一匹配值等于它（弱类型）即通过。四类基础检查点（status/contains/field_eq/not_empty）之外的兜底能力。
@@ -118,7 +142,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 - admin 全可见；member 仅见自己创建或被加入的项目（`perms.check_project_access`）。
 - 模型配置、用户管理、通知渠道写操作仅 admin。
 
-## 5. 数据模型（15 表）
+## 5. 数据模型（17 表）
 
 `users` 账号 · `projects` 项目 · `project_members` 成员 · `envs` 环境（一项目一条）· `project_users` **项目测试用户**（账号密码池，名称/账号/密码/备注）·
 `test_cases` 用例（api/ui/ai，含绑定的测试账号 `username/password`）·
@@ -126,7 +150,8 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 `test_runs` **统一执行记录**（单用例 `case_id` / 单流程 `flow_id` / 整计划 `plan_id` 三种来源，流程历史也查此表）·
 `flows` 流程定义 ·
 `git_repos` 仓库绑定（含 webhook secret）· `commit_syncs` 同步的提交 · `notify_channels` 告警渠道（含 webhook 地址）·
-`llm_configs` 模型配置（**含 API Key 明文**）· `llm_logs` LLM 调用与 token 用量。
+`llm_configs` 模型配置（**含 API Key 明文**）· `llm_logs` LLM 调用与 token 用量 ·
+`app_pages`/`app_elements` **应用地图**（期望基线：页面与按钮/链接，含 `source` 来源 scan/code/manual、`roles` 可见角色、元素 `state_note` 出现条件备注）。
 
 > 旧版独立 `flow_runs` 表已在启动迁移中并入 `test_runs`（数据自动搬运后删表）。
 
@@ -144,6 +169,8 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 | AI | `POST /ai/gen-from-commits` · `POST /ai/gen-from-text` · `POST /ai/analyze-run/{rid}` · `GET /ai/usage` · `GET /ai/regression-advice` |
 | 设置 | `GET/POST /settings/notify` · `PUT/DELETE /settings/notify/{cid}` · `POST /settings/notify/{cid}/test` · `GET/POST /settings/llm` · `PUT/DELETE /settings/llm/{id}` · `POST /settings/llm/{id}/activate` · `POST /settings/llm/test` · `POST /settings/llm/models` |
 | 录制 | `POST /cases/ui-record/start` · `GET /cases/ui-record/{sid}/frame`（轮询兜底）· **`WS /cases/ui-record/{sid}/stream`**（Screencast 推流，`?token=` 鉴权）· `POST /cases/ui-record/{sid}/cmd` · `POST /cases/ui-record/{sid}/cancel-ai` · `GET /cases/ui-record/{sid}` |
+| 应用地图 | `POST /projects/{pid}/app-map/scan`（可多角色 `user_ids`）· `GET /projects/{pid}/app-map` · `POST /projects/{pid}/app-map/upsert`（合并写入）· `DELETE /projects/{pid}/app-map` |
+| MCP | `STREAMABLE-HTTP /mcp`（工具：项目/用户/用例查询、用例与流程执行、执行明细、创建删除用例、用量统计、地图 upsert、浏览器会话六件套） |
 | 健康 | `GET /health` |
 
 ## 7. 配置参考
@@ -154,15 +181,19 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 |---|---|---|
 | `TD_DB` | `backend/testdeck.db` | SQLite 路径，本地开发/测试默认 |
 | `TD_DATABASE_URL` | 未设 | 生产数据库连接串（PostgreSQL/MySQL），设置后优先于 SQLite |
-| `TD_SECRET` | 开发默认值 | JWT 签名密钥，**生产必须设置** |
+| `TD_SECRET` | 自动生成 | JWT 签名密钥：未配置时自动生成随机密钥并持久化到 `backend/.secret_key`（已 gitignore），绝不使用默认常量；生产多实例/重建容器请在 `.env` 显式固定 |
 | `TD_ADMIN_PASSWORD` | `admin123` | 初始 admin 密码，**生产必须修改** |
 | `TD_SEED_DEMO` | `1` | 是否预置询价单演示数据 |
 | `TD_NO_SCHEDULER` | 未设 | 设为 1 禁用调度（测试用） |
 | `TD_WORKERS` | `1` | 执行队列并发数（1-16）：默认串行，团队规模上来后调大 |
+| `TD_MCP` | `1` | 设 0 关闭 MCP 服务（/mcp 端点与工具） |
+| `TD_PUBLIC_URL` | 未设 | 平台对外访问地址（如 `https://td.corp.com`）：MCP 配置里的接入 URL 优先用它，避免反向代理改写 Host 导致地址错误 |
 | `TD_KEEP_DAYS` | `30` | 截图与执行录像保留天数 |
 | `TD_SHOT_DIFF` | `1` | 设为 0 关闭流程截图基线对比 |
 | `TD_SHOT_DIFF_PCT` | `2` | 截图与基线的差异阈值（百分比，超过判失败） |
 | `TD_BROWSER_ENGINE` | `chromium` | `lightpanda` 启用轻量引擎 |
+| `TD_BRAIN` | `legacy` | `agentscope` 切换 AI 决策循环为 AgentScope ReAct agent（PLAN 批次 B 迁移期开关，基准对比达标后转默认） |
+| `TD_BROWSER_SESSION_TTL` | `1800` | MCP 浏览器会话空闲回收秒数 |
 | `TD_LIGHTPANDA_URL` | `http://127.0.0.1:9222` | Lightpanda CDP 地址 |
 | `TD_LIGHTPANDA_BIN` | 未设 | lightpanda 可执行文件路径，设置后平台自动拉起 |
 | `TD_LLM_BASE_URL/KEY/MODEL` | 未设 | LLM 兜底配置（「模型配置」页的库内配置优先） |
@@ -183,7 +214,8 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 ## 9. 测试
 
 ```bash
-cd backend && .venv/Scripts/python -m pytest tests -q     # 76 个单元/接口测试
+cd backend && .venv/Scripts/python -m pytest tests -q     # 107 个单元/接口测试
+# 新旧 brain 基准对比（真实环境，PLAN B4）：.venv/Scripts/python benchmark_brain.py <case_id> -n 3
 # E2E（需先起后端与 mock 被测系统 9001）：
 tests/e2e.py e2e_m2.py e2e_m3.py e2e_m5.py e2e_flow.py
 # 假 LLM 服务器（AI 引擎联调用）：uvicorn tests.fake_llm:app --port 9111
@@ -196,7 +228,8 @@ tests/e2e.py e2e_m2.py e2e_m3.py e2e_m5.py e2e_flow.py
 | 路径 | 内容 |
 |---|---|
 | `backend/testdeck.db` | **全部运行数据**：模型 API Key 明文、账号密码哈希、告警 webhook 地址（含 access_token）、执行记录与被测系统响应 |
-| `backend/static/` | 执行截图（可能含被测系统页面与业务数据） |
+| `backend/.secret_key`、`backend/.token_epoch` | JWT 签名密钥（未配 TD_SECRET 时自动生成）与令牌版本（已 gitignore） |
+| `backend/static/` | 执行截图与录像（可能含被测系统页面与业务数据）——**已加登录鉴权**：浏览器走登录时下发的 `td_token` Cookie，程序访问带 `Authorization: Bearer` |
 | `backend/.venv/`、`frontend/node_modules/`、`frontend/dist/` | 本地产物/构建产物 |
 
 **代码中允许公开的敏感字样**（均为示例或带安全说明）：

@@ -38,6 +38,65 @@ def _push_run_detail(run_id: str, detail: list):
         db.close()
 
 
+async def _exec_case_sync(c: TestCase, env: Env, trigger_by: str) -> TestRun:
+    """完整执行一个用例（建记录 → 队列执行 → 回写 → 通知）。REST 与 MCP 共用。"""
+    run = TestRun(id=_new_run_id(), case_id=c.id, case_name=c.name,
+                  env_id=env.id, env_name=env.name, trigger_by=trigger_by)
+    db = SessionLocal()
+    try:
+        db.add(run)
+        db.commit()
+
+        def _exec():
+            if c.type == "ui":
+                return run_ui_case(c, env, run.id)
+            if c.type == "ai":
+                return run_ai_case(c, env, run.id, on_step=lambda d: _push_run_detail(run.id, d))
+            return run_case(c, env)
+
+        register(run.id)
+        try:
+            r = await queued(_exec)
+        finally:
+            unregister(run.id)
+        run.status, run.pass_n, run.fail_n = r["status"], r["pass_n"], r["fail_n"]
+        run.duration, run.detail = r["duration"], r["detail"]
+        db.commit()
+        await notify_run(run)
+        return run
+    finally:
+        db.close()
+
+
+async def _exec_flow_sync(f: Flow, env: Env | None, trigger_by: str) -> TestRun:
+    """完整执行一个流程（建记录 → 预载引用用例 → 队列执行 → 回写 → 通知）。REST 与 MCP 共用。"""
+    from ..engine.flow_runner import run_flow
+    run = TestRun(id=_new_run_id(), flow_id=f.id, flow_name=f.name,
+                  env_id=env.id if env else None, env_name=env.name if env else "",
+                  trigger_by=trigger_by)
+    db = SessionLocal()
+    try:
+        db.add(run)
+        db.commit()
+        cases = {c.id: c for c in db.query(TestCase).filter(TestCase.project_id == f.project_id)}
+        register(run.id)
+
+        def _exec():
+            return run_flow(f, env, run.id, on_step=lambda d: _push_run_detail(run.id, d), cases=cases)
+
+        try:
+            r = await queued(_exec)
+        finally:
+            unregister(run.id)
+        run.status, run.pass_n, run.fail_n = r["status"], r["pass_n"], r["fail_n"]
+        run.duration, run.detail = r["duration"], r["detail"]
+        db.commit()
+        await notify_run(run)
+        return run
+    finally:
+        db.close()
+
+
 def execute_plan(plan: TestPlan, env: Env, trigger_by: str = "cron") -> TestRun:
     """同步执行整个计划：先逐条用例、再逐条流程（条目失败不中断批次），写一条 TestRun。
 
@@ -112,27 +171,7 @@ async def run_single(cid: str, body: RunIn, db: Session = Depends(get_db), user:
     env = db.get(Env, body.env_id)
     if not env:
         raise HTTPException(400, "环境不存在")
-    run = TestRun(id=_new_run_id(), case_id=c.id, case_name=c.name,
-                  env_id=env.id, env_name=env.name, trigger_by=f"user:{user.username}")
-    db.add(run); db.commit()
-
-    def _exec():
-        if c.type == "ui":
-            return run_ui_case(c, env, run.id)
-        if c.type == "ai":
-            return run_ai_case(c, env, run.id,
-                               on_step=lambda d: _push_run_detail(run.id, d))
-        return run_case(c, env)
-
-    register(run.id)
-    try:
-        r = await queued(_exec)
-    finally:
-        unregister(run.id)
-    run.status, run.pass_n, run.fail_n = r["status"], r["pass_n"], r["fail_n"]
-    run.duration, run.detail = r["duration"], r["detail"]
-    db.commit()
-    await notify_run(run)
+    run = await _exec_case_sync(c, env, f"user:{user.username}")
     return _run_out(run)
 
 
@@ -224,8 +263,9 @@ def export_run(rid: str, db: Session = Depends(get_db), user: User = Depends(cur
     # 单用例 / 单流程：detail 即步骤
     step_rows = ""
     for s in (r.detail or []) if (r.case_id or r.flow_id) else []:
+        warn = f"<div style='color:#b8860b'>⚠ {esc(s.get('warning'))}</div>" if s.get("warning") else ""
         step_rows += (f"<tr><td class='m'>{esc(s.get('m') or s.get('action') or s.get('type'))} {esc(s.get('url') or s.get('target', ''))}</td>"
-                      f"<td>{'✓' if s.get('pass') else '✗'} {esc(s.get('reason'))}</td></tr>")
+                      f"<td>{'✓' if s.get('pass') else '✗'} {esc(s.get('reason'))}{warn}</td></tr>")
     html = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>TestDeck 报告 {r.id}</title>
 <style>body{{font-family:sans-serif;margin:40px;color:#333}}table{{border-collapse:collapse;width:100%;margin:16px 0}}
 td,th{{border:1px solid #ddd;padding:8px 12px;font-size:14px;text-align:left}}.m{{font-family:monospace}}

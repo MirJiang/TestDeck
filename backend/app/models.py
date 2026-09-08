@@ -71,6 +71,38 @@ class ProjectUser(Base):
     created_at = Column(DateTime, default=now)
 
 
+class AppPage(Base):
+    """应用地图·页面（爬取器产出）：一个项目一份地图，重扫只全量替换 scan 来源的页面。"""
+    __tablename__ = "app_pages"
+    id = Column(String(64), primary_key=True, default=uid)
+    project_id = Column(String(64), nullable=False, index=True)
+    path = Column(String(512), default="")     # 路径（含 hash 路由），作为页面标识
+    title = Column(String(255), default="")
+    depth = Column(Integer, default=0)         # 距起始页的跳数
+    source = Column(String(16), default="scan")  # scan=爬取 | code=源码分析 | manual=手动/upsert
+    roles = Column(String(255), default="")      # 见到该页的角色（逗号分隔），多角色扫描合并产出
+    scanned_at = Column(DateTime, default=now)
+
+
+class AppElement(Base):
+    """应用地图·页面元素：按钮（含禁用状态）与链接（跳转关系）。
+
+    地图 = 期望基线：只由扫描 / 源码分析 / 人工维护写入，执行观察永不回写。
+    state_note 非空表示元素仅在特定状态下出现（如"审批中才显示"），执行比对时跳过。
+    """
+    __tablename__ = "app_elements"
+    id = Column(String(64), primary_key=True, default=uid)
+    page_id = Column(String(64), nullable=False, index=True)
+    kind = Column(String(16), default="button")   # button | link
+    text = Column(String(255), default="")
+    selector = Column(String(512), default="")
+    href = Column(String(512), default="")        # link：目标路径
+    disabled = Column(Boolean, default=False)     # button：扫描时是否禁用
+    source = Column(String(16), default="scan")   # scan | code | manual
+    state_note = Column(String(255), default="")  # 出现条件备注（非空 = 条件性元素，比对跳过）
+    roles = Column(String(255), default="")       # 见到该元素的角色（逗号分隔）
+
+
 class TestPlan(Base):
     __tablename__ = "test_plans"
     id = Column(String(64), primary_key=True, default=uid)

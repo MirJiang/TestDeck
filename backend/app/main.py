@@ -20,7 +20,12 @@ async def lifespan(app: FastAPI):
     from .maintenance import register_daily, cleanup_screenshots
     register_daily()
     cleanup_screenshots()
-    yield
+    if (config.get("TD_MCP") or "1") != "0":
+        from .mcp_server import mcp
+        async with mcp.session_manager.run():   # MCP 会话管理器随应用启停
+            yield
+    else:
+        yield
 
 
 def _migrate():
@@ -35,13 +40,19 @@ def _migrate():
                     conn.execute(text("ALTER TABLE llm_configs ADD COLUMN vision BOOLEAN DEFAULT FALSE"))
                 else:  # sqlite / mysql
                     conn.execute(text("ALTER TABLE llm_configs ADD COLUMN vision BOOLEAN DEFAULT 0"))
-    # 计划支持包含流程；流程执行记录统一并入 test_runs；用例绑定测试账号
+    # 计划支持包含流程；流程执行记录统一并入 test_runs；用例绑定测试账号；
+    # 应用地图加来源/角色/状态备注（地图=期望基线，多来源写入）
     for table, column, ddl in [
         ("test_plans", "flow_ids", "JSON"),
         ("test_runs", "flow_id", "VARCHAR(64)"),
         ("test_runs", "flow_name", "VARCHAR(255)"),
         ("test_cases", "username", "VARCHAR(255) DEFAULT ''"),
         ("test_cases", "password", "VARCHAR(255) DEFAULT ''"),
+        ("app_pages", "source", "VARCHAR(16) DEFAULT 'scan'"),
+        ("app_pages", "roles", "VARCHAR(255) DEFAULT ''"),
+        ("app_elements", "source", "VARCHAR(16) DEFAULT 'scan'"),
+        ("app_elements", "state_note", "VARCHAR(255) DEFAULT ''"),
+        ("app_elements", "roles", "VARCHAR(255) DEFAULT ''"),
     ]:
         if table in insp.get_table_names():
             cols = {c["name"] for c in insp.get_columns(table)}
@@ -140,10 +151,48 @@ app = FastAPI(title="TestDeck", version="0.1.0", lifespan=lifespan)
 _cors = [o.strip() for o in config.get("TD_CORS_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_cors, allow_methods=["*"], allow_headers=["*"])
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import PlainTextResponse
 from pathlib import Path as _P
-_static = _P(__file__).parent.parent / "static"
+_static = _P(__file__).resolve().parent.parent / "static"
 _static.mkdir(exist_ok=True)
-app.mount("/static", StaticFiles(directory=str(_static)), name="static")
+
+
+class _AuthedStaticFiles(StaticFiles):
+    """执行截图/录像可能含被测系统页面与业务数据：仅登录用户可访问。
+
+    鉴权双通道：Authorization: Bearer（API/程序访问）或登录时下发的 td_token Cookie
+    （<img>/<video> 标签带不了请求头，靠浏览器自动带 Cookie）。"""
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            from .auth import resolve_token
+            from .db import SessionLocal
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                       for k, v in scope.get("headers", [])}
+            token = ""
+            auth = headers.get("authorization", "")
+            if auth.lower().startswith("bearer "):
+                token = auth[7:]
+            if not token:
+                for part in headers.get("cookie", "").split(";"):
+                    k, _, v = part.strip().partition("=")
+                    if k == "td_token":
+                        token = v
+                        break
+            db = SessionLocal()
+            try:
+                user = resolve_token(token, db) if token else None
+            except Exception:
+                user = None
+            finally:
+                db.close()
+            if user is None:
+                resp = PlainTextResponse("需要登录后访问", status_code=403)
+                await resp(scope, receive, send)
+                return
+        await super().__call__(scope, receive, send)
+
+
+app.mount("/static", _AuthedStaticFiles(directory=str(_static)), name="static")
 app.include_router(auth.router)
 app.include_router(projects.router)
 app.include_router(cases.router)
@@ -154,6 +203,12 @@ app.include_router(ai.router)
 app.include_router(settings.router)
 app.include_router(flows.router)
 app.include_router(api_docs.router)
+
+# MCP 服务（Streamable HTTP）：外部 AI agent 连 http://<host>:8000/mcp，
+# 请求头 Authorization: Bearer <平台登录 token> 鉴权
+if (config.get("TD_MCP") or "1") != "0":
+    from .mcp_server import mcp_app
+    app.mount("/mcp", mcp_app)
 
 
 @app.get("/api/v1/health")

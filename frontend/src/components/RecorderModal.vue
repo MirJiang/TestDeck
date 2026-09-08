@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, nextTick, onBeforeUnmount } from 'vue'
+import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { api, getToken } from '../api'
 import { confirmDialog } from '../dialog'
 
@@ -13,6 +13,8 @@ const props = defineProps({
   roleNote: { type: String, default: '' },   // 流程测试里为某个角色录制时的提示
   envs: { type: Array, default: () => [] },  // 可选：注入 AI 代劳的环境变量（选中的环境）
   presetVars: { type: Object, default: () => ({}) },  // 额外注入 AI 代劳的变量（用例账号/流程角色变量），优先于环境变量
+  autoStart: { type: Boolean, default: false },        // 打开即开始录制（AI 现场生成用例用）
+  autoGoal: { type: String, default: '' },             // 开始后自动下达的 AI 代劳目标
 })
 const emit = defineEmits(['done', 'close'])
 
@@ -213,6 +215,15 @@ async function abandon() {
   if (n && !await confirmDialog(`放弃本次录制？已录的 ${n} 步将不会保留。`, { danger: true, okText: '放弃' })) return
   emit('close')
 }
+
+onMounted(async () => {
+  // AI 现场生成用例：打开即开始录制并自动下达目标
+  if (props.autoStart && props.initialUrl) {
+    url.value = props.initialUrl
+    await start('remote')
+    if (props.autoGoal && !finished) { aiGoal.value = props.autoGoal; doAi() }
+  }
+})
 
 onBeforeUnmount(() => {
   // 关闭弹窗时若 AI 还在跑，尽力通知后端中止（否则它会继续消耗 token 到步数上限）

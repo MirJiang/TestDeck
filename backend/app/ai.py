@@ -174,12 +174,13 @@ def test_connection(base_url: str = "", api_key: str = "", model: str = "") -> d
                 "ms": int((time.time() - t0) * 1000)}
 
 
-def _log_usage(kind, pt, ct, ok):
+def _log_usage(kind, pt, ct, ok, model=""):
     from .db import SessionLocal
     from .models import LLMLog
     db = SessionLocal()
     try:
-        db.add(LLMLog(kind=kind, model=current_model(), prompt_tokens=pt, completion_tokens=ct, ok=ok))
+        db.add(LLMLog(kind=kind, model=model or current_model(),
+                      prompt_tokens=pt, completion_tokens=ct, ok=ok))
         db.commit()
     except Exception:
         pass

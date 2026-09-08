@@ -16,8 +16,32 @@ import time as _time
 _login_attempts: dict = {}   # {username: [最近失败时间戳]}，登录限速用
 
 
+_SECRET_FILE = __import__("pathlib").Path(__file__).resolve().parent.parent / ".secret_key"
+
+
 def _secret() -> str:
-    return config.get("TD_SECRET") or "testdeck-dev-secret-change-me"
+    """JWT 签名密钥：TD_SECRET 优先；未配置时自动生成随机密钥并持久化到 backend/.secret_key（跨重启稳定）。
+
+    不再回退到公开的默认常量——那等于密钥人人可知。只读环境写不了文件时退回进程内随机
+    （重启后令牌失效，但绝不使用可预测值）。"""
+    import secrets as _secrets
+    v = (config.get("TD_SECRET") or "").strip()
+    if v:
+        return v
+    try:
+        v = _SECRET_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        v = ""
+    if v:
+        return v
+    v = _secrets.token_urlsafe(48)
+    try:
+        _SECRET_FILE.write_text(v, encoding="utf-8")
+        print("[TestDeck] TD_SECRET 未配置：已自动生成随机密钥并持久化到 backend/.secret_key；"
+              "生产多实例/重建容器场景请在 .env 显式配置 TD_SECRET")
+    except Exception:
+        pass   # 只读环境：本进程内保持一致即可
+    return v
 
 
 _EPOCH_FILE = __import__("pathlib").Path(__file__).resolve().parent.parent / ".token_epoch"
@@ -75,6 +99,17 @@ def record_login_fail(username: str) -> None:
 def make_token(user: User) -> str:
     payload = {"sub": user.id, "name": user.username, "role": user.role,
                "epoch": _token_version(), "exp": int(time.time()) + TOKEN_TTL}
+    return jwt.encode(payload, _secret(), algorithm="HS256")
+
+
+MCP_TOKEN_TTL = 10 * 365 * 24 * 3600   # MCP 专用长时效令牌：10 年
+
+
+def make_mcp_token(user: User) -> str:
+    """MCP 接入令牌：长时效（不受登录态过期影响），epoch 随改密/重置密码递增即可整体吊销。"""
+    payload = {"sub": user.id, "name": user.username, "role": user.role,
+               "scope": "mcp", "epoch": _token_version(),
+               "exp": int(time.time()) + MCP_TOKEN_TTL}
     return jwt.encode(payload, _secret(), algorithm="HS256")
 
 

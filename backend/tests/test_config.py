@@ -1,8 +1,19 @@
 """配置中心：解析规则、set 覆盖、幂等（只认 .env 注册表，不读系统环境变量）。"""
 import os  # noqa: F401  仅用于断言注册表与系统环境完全隔离
 
+import pytest
+
 from app import config
 config.set("TD_DB", ":memory:")
+
+
+@pytest.fixture(autouse=True)
+def _restore_config():
+    """用例内的 _values.clear() 不能把 conftest 的全局配置（内存库/禁调度/禁 MCP）带走。"""
+    saved = dict(config._values)
+    yield
+    config._values.clear()
+    config._values.update(saved)
 
 
 def test_parse_rules(tmp_path):

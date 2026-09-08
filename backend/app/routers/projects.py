@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..db import get_db
-from ..models import User, Project, Env, ProjectMember, ProjectUser
+from ..models import User, Project, Env, ProjectMember, ProjectUser, AppPage, AppElement
 from ..auth import current_user
 from ..perms import check_project_access, accessible_project_ids
 
@@ -229,4 +229,100 @@ def remove_member(pid: str, uid: str, db: Session = Depends(get_db), user: User 
     m = db.query(ProjectMember).filter_by(project_id=pid, user_id=uid).first()
     if m:
         db.delete(m); db.commit()
+    return {"ok": True}
+
+
+# ---------- 应用地图（页面/按钮/关系：期望基线，多来源写入，执行观察不回写） ----------
+
+class ScanIn(BaseModel):
+    start_path: str = ""
+    user_id: str = ""            # 兼容旧调用：单个测试账号 AI 代劳登录后爬取
+    user_ids: list[str] = []     # 多角色扫描：逐个 AI 登录爬取后按 path 合并
+    max_pages: int = 25
+
+
+class MapElementIn(BaseModel):
+    kind: str = "button"          # button | link
+    text: str = ""
+    selector: str = ""
+    href: str = ""
+    disabled: bool | None = None
+    state_note: str = ""          # 出现条件备注（非空 = 条件性元素，执行比对跳过）
+
+
+class MapPageIn(BaseModel):
+    path: str
+    title: str = ""
+    depth: int | None = None
+    elements: list[MapElementIn] = []
+
+
+class UpsertIn(BaseModel):
+    source: str = "manual"        # code=源码分析 | manual=人工；非法值按 manual 处理
+    pages: list[MapPageIn] = []
+
+
+@router.post("/{pid}/app-map/scan")
+async def scan_app_map(pid: str, body: ScanIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """扫描被测系统生成应用地图（同源 BFS，静态资源过滤；可勾选多个测试账号逐角色 AI 代劳登录后合并）。"""
+    import asyncio
+    from ..engine.app_mapper import scan_app
+    check_project_access(pid, user, db)
+    env = db.query(Env).filter(Env.project_id == pid).first()
+    if not env or not (env.base_url or "").startswith(("http://", "https://")):
+        raise HTTPException(400, "项目未配置有效的环境地址")
+    ids = list(dict.fromkeys(i for i in [*body.user_ids, body.user_id] if i))
+    users = []
+    for uid in ids:
+        u = db.get(ProjectUser, uid)
+        if u and u.project_id == pid:
+            users.append({"name": u.name or u.username, "username": u.username, "password": u.password})
+    if ids and not users:
+        raise HTTPException(400, "所选测试账号不存在或不属于该项目")
+    result = await asyncio.to_thread(
+        scan_app, env.base_url, pid, body.start_path, users,
+        max(1, min(50, body.max_pages)))
+    return result
+
+
+@router.post("/{pid}/app-map/upsert")
+def upsert_app_map(pid: str, body: UpsertIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """合并写入地图（源码分析 Skill / 人工维护通道）：页面按 path 匹配，元素同键 upsert，不删已有数据。"""
+    from ..engine.app_mapper import upsert_map
+    check_project_access(pid, user, db)
+    get_project(pid, db)
+    if not body.pages:
+        raise HTTPException(400, "pages 不能为空")
+    return upsert_map(pid, [p.model_dump() for p in body.pages], body.source)
+
+
+@router.get("/{pid}/app-map")
+def get_app_map(pid: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """应用地图：页面清单（含按钮与链接关系、来源与角色标注）。"""
+    check_project_access(pid, user, db)
+    pages = db.query(AppPage).filter(AppPage.project_id == pid).order_by(AppPage.depth, AppPage.path).all()
+    out = []
+    for pg in pages:
+        els = db.query(AppElement).filter(AppElement.page_id == pg.id).all()
+        out.append({"id": pg.id, "path": pg.path, "title": pg.title, "depth": pg.depth,
+                    "source": pg.source or "scan", "roles": pg.roles or "",
+                    "scanned_at": pg.scanned_at.isoformat() if pg.scanned_at else "",
+                    "buttons": [{"text": e.text, "selector": e.selector, "disabled": e.disabled,
+                                 "source": e.source or "scan", "state_note": e.state_note or "",
+                                 "roles": e.roles or ""}
+                                for e in els if e.kind == "button"],
+                    "links": [{"text": e.text, "href": e.href,
+                               "source": e.source or "scan", "state_note": e.state_note or "",
+                               "roles": e.roles or ""}
+                              for e in els if e.kind == "link"]})
+    return out
+
+
+@router.delete("/{pid}/app-map")
+def clear_app_map(pid: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    check_project_access(pid, user, db)
+    for old in db.query(AppPage).filter(AppPage.project_id == pid):
+        db.query(AppElement).filter(AppElement.page_id == old.id).delete()
+    db.query(AppPage).filter(AppPage.project_id == pid).delete()
+    db.commit()
     return {"ok": True}

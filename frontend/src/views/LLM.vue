@@ -54,6 +54,34 @@ async function load() {
   usage.value = await api('/ai/usage')
   notifies.value = await api('/settings/notify')
 }
+// ---- MCP 接入（每个用户自己的长时效令牌） ----
+const mcp = ref(null)
+async function loadMcp() { mcp.value = await api('/settings/mcp') }
+async function copyMcp() {
+  try {
+    await navigator.clipboard.writeText(mcp.value.config_json)
+    toast('已复制：粘贴到 Cursor / Claude 等客户端的 MCP 配置即可接入', 4000)
+  } catch {
+    toast('复制失败，请手动选择文本复制')
+  }
+}
+// 配置 + 工具清单一起复制：贴进 agent 规则/系统提示词，AI 未连接也知道平台有哪些工具
+function toolsDoc() {
+  const tools = mcp.value?.tools || []
+  const lines = tools.map(t => `### ${t.name}\n${t.description || ''}`)
+  return `# TestDeck MCP 接入\n\n## 客户端配置\n\n\`\`\`json\n${mcp.value.config_json}\n\`\`\`\n\n` +
+    `## 工具清单（共 ${tools.length} 个；连接后客户端也会自动发现）\n\n` + lines.join('\n\n')
+}
+async function copyMcpFull() {
+  try {
+    await navigator.clipboard.writeText(toolsDoc())
+    toast('已复制配置+工具说明（Markdown）：可贴进 agent 规则或团队文档', 4000)
+  } catch {
+    toast('复制失败，请手动选择文本复制')
+  }
+}
+loadMcp()
+
 onMounted(load)
 
 function openNAdd() {
@@ -250,6 +278,37 @@ async function delRow(r) {
   </div>
 
   <!-- 失败告警通知渠道 -->
+  <div class="panel" v-if="mcp">
+    <div class="bar">
+      <h3>MCP 接入（让外部 AI agent 操作测试平台）</h3>
+      <div style="display:flex;gap:8px">
+        <button class="btn sm" @click="loadMcp">重新生成</button>
+        <button class="btn sm" @click="copyMcpFull" title="复制 Markdown：客户端配置 + 全部工具的名称与用途说明，可贴进 agent 规则/系统提示词或团队文档">复制配置+工具说明</button>
+        <button class="btn sm pri" @click="copyMcp">一键复制配置</button>
+      </div>
+    </div>
+    <div class="muted" style="font-size:12.5px;margin-bottom:8px">
+      在 Cursor / Claude 等支持 MCP 的客户端粘贴下方配置即可，连接后客户端会自动发现全部工具。令牌为<b>长时效专用令牌</b>
+      （10 年有效、不受登录过期与服务重启影响，权限跟随你的账号）；修改密码后全部令牌自动吊销、需重新生成。
+    </div>
+    <textarea readonly :value="mcp.config_json" rows="7" class="mono"
+              style="width:100%;font-size:12px;background:#fcfcfd"></textarea>
+    <details v-if="mcp.tools?.length" style="margin-top:10px">
+      <summary style="cursor:pointer;font-size:13px" class="muted">
+        平台暴露的 {{ mcp.tools.length }} 个 MCP 工具（名称与用途）
+      </summary>
+      <table style="margin-top:8px">
+        <thead><tr><th style="width:200px">工具</th><th>用途</th></tr></thead>
+        <tbody>
+          <tr v-for="t in mcp.tools" :key="t.name">
+            <td class="mono" style="font-size:12px">{{ t.name }}</td>
+            <td class="muted" style="font-size:12px;white-space:pre-line">{{ (t.description || '').split('\n').slice(0, 2).join('\n') }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </details>
+  </div>
+
   <div class="panel">
     <div class="bar">
       <h3>失败告警通知（钉钉 / 企微群机器人）</h3>

@@ -70,3 +70,4 @@ ehthumbs.db
 .claude/
 .aider*
 .token_epoch
+.secret_key

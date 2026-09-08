@@ -15,6 +15,7 @@ const nav = [
   { path: '/runs', label: '执行记录' },
   { cap: '测试资产' },
   { path: '/projects', label: '项目' },
+  { path: '/appmap', label: '应用地图' },
   { path: '/cases', label: '用例' },
   { path: '/flows', label: '流程测试' },
   { path: '/plans', label: '测试计划' },
@@ -59,7 +60,6 @@ async function changePw() {
       <div class="top">
         <div class="path">{{ nav.find(n => n.path === route.path)?.label || '' }}</div>
         <div style="display:flex;gap:10px;align-items:center">
-          <button class="btn sm pri" @click="router.push('/cases')">去测试</button>
           <div style="position:relative">
             <button class="avatar-btn" :title="user?.username" @click="showUser = !showUser">
               {{ (user?.username || '?').slice(0, 2).toUpperCase() }}

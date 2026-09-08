@@ -95,6 +95,7 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
     t0 = time.time()
     api_clients = {}   # role -> httpx.Client
     browser = pages = contexts = None
+    engine_used = "chromium"   # launch_browser 实际使用的引擎；截图类步骤据此优雅降级
     _pw = None
     videos = {}        # role -> 视频静态路径（角色会话的执行录像）
     role_names = {k: (r.get("name") or k) for k, r in roles.items()}
@@ -107,11 +108,11 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
         return api_clients[role]
 
     def ensure_browser():
-        nonlocal browser, contexts, pages, _pw
+        nonlocal browser, contexts, pages, _pw, engine_used
         if browser is None:
             from playwright.sync_api import sync_playwright
             _pw = sync_playwright().start()
-            browser, _, _ = launch_browser(_pw)  # 引擎由全局配置决定
+            browser, engine_used, _ = launch_browser(_pw)  # 引擎由全局配置决定
             contexts, pages = {}, {}
         return browser
 
@@ -204,11 +205,14 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
             res.update(**{"pass": True, "reason": f"拖拽 ({x1},{y1})→({x2},{y2})"})
         elif action == "ai":  # AI 代劳步骤：在角色会话内现场重新执行目标，失败自动重试
             from .ai_runner import ai_drive
+            from .app_mapper import app_map_brief
             retries = max(0, min(3, int(step.get("retries", 1))) if str(step.get("retries", "1")).strip() != "" else 1)
             r, attempt = {}, 0
             for attempt in range(retries + 1):
                 r = ai_drive(page, val, {**role_vars.get(role, {}), **shared},
-                             max_steps=60, run_id=run_id, shot_tag=f"{run_id}-{tag}")
+                             max_steps=60, run_id=run_id, shot_tag=f"{run_id}-{tag}",
+                             page_map=app_map_brief(getattr(flow, "project_id", "")),
+                             project_id=getattr(flow, "project_id", "") or "")
                 if r.get("status") == "passed":
                     break
             ok = r.get("status") == "passed"
@@ -229,28 +233,34 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
             ok = val in body
             res.update(**{"pass": ok, "reason": f"页面未包含「{val}」（应显示）" if not ok else f"包含「{val}」"})
         elif action == "screenshot":
-            path = STATIC_DIR / f"{run_id}-{tag}.png"
-            page.screenshot(path=str(path), full_page=True)
-            res.update(**{"pass": True, "reason": "已截图", "screenshot": f"/static/{path.name}"})
-            if _shot_diff_enabled():
-                baseline = STATIC_DIR / f"base-{flow.id}-{tag}.png"
-                if baseline.exists():
-                    pct = _shot_diff_pct(baseline, path)
-                    if pct is not None:
-                        if pct > diff_pct:
-                            diff_img = STATIC_DIR / f"{run_id}-{tag}-diff.png"
-                            _save_side_by_side(baseline, path, diff_img)
-                            res.update(**{
-                                "pass": False,
-                                "reason": f"页面与基线差异 {pct}%（阈值 {diff_pct}%）",
-                                "baseline": f"/static/{baseline.name}",
-                                "diff": f"/static/{diff_img.name}"})
-                        else:
-                            res["reason"] = f"已截图，与基线差异 {pct}%（阈值 {diff_pct}% 内）"
+            try:
+                path = STATIC_DIR / f"{run_id}-{tag}.png"
+                page.screenshot(path=str(path), full_page=True)
+                res.update(**{"pass": True, "reason": "已截图", "screenshot": f"/static/{path.name}"})
+                if _shot_diff_enabled():
+                    baseline = STATIC_DIR / f"base-{flow.id}-{tag}.png"
+                    if baseline.exists():
+                        pct = _shot_diff_pct(baseline, path)
+                        if pct is not None:
+                            if pct > diff_pct:
+                                diff_img = STATIC_DIR / f"{run_id}-{tag}-diff.png"
+                                _save_side_by_side(baseline, path, diff_img)
+                                res.update(**{
+                                    "pass": False,
+                                    "reason": f"页面与基线差异 {pct}%（阈值 {diff_pct}%）",
+                                    "baseline": f"/static/{baseline.name}",
+                                    "diff": f"/static/{diff_img.name}"})
+                            else:
+                                res["reason"] = f"已截图，与基线差异 {pct}%（阈值 {diff_pct}% 内）"
+                    else:
+                        import shutil
+                        shutil.copyfile(path, baseline)   # 首次通过自动留存基线
+                        res["reason"] = "已截图（已留存基线）"
+            except Exception:
+                if engine_used == "lightpanda":   # 视觉相关能力缺失不影响执行链路
+                    res.update(**{"pass": True, "reason": "Lightpanda 不支持截图，已跳过留档（基线对比同跳过）"})
                 else:
-                    import shutil
-                    shutil.copyfile(path, baseline)   # 首次通过自动留存基线
-                    res["reason"] = "已截图（已留存基线）"
+                    raise
         else:
             res["reason"] = f"不支持的动作：{action}"
 
@@ -331,7 +341,8 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
                 ai_vars = {**shared, **role_vars[role]}
                 r_ai = ai_drive(page, goal, ai_vars,
                                 max_steps=int(cfg.get("max_steps") or 15),
-                                run_id=run_id, shot_tag=tag)
+                                run_id=run_id, shot_tag=tag,
+                                project_id=getattr(flow, "project_id", "") or "")
                 shared.update(r_ai.get("saved") or {})
                 sub.append({"idx": 1, "type": "ai", "target": f"[AI] {goal[:60]}",
                             "pass": r_ai["status"] == "passed",
@@ -383,7 +394,8 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
                         ai_vars = {**shared, **role_vars[role]}
                         r_ai = ai_drive(page, goal, ai_vars,
                                         max_steps=int(step.get("max_steps") or 15),
-                                        run_id=run_id, shot_tag=f"flow{i}")
+                                        run_id=run_id, shot_tag=f"flow{i}",
+                                        project_id=getattr(flow, "project_id", "") or "")
                         shared.update(r_ai["saved"])
                         res.update(target=f"[AI] {goal[:60]}",
                                    **{"pass": r_ai["status"] == "passed"},

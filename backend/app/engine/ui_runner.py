@@ -91,9 +91,15 @@ def _sync_run(case, env, run_id: str, engine: str | None = None) -> dict:
                     ok = val in body
                     res.update(**{"pass": ok, "reason": f"页面未包含「{val}」（应显示）" if not ok else f"包含「{val}」"})
                 elif action == "screenshot":
-                    path = STATIC_DIR / f"{run_id}-{i}.png"
-                    page.screenshot(path=str(path), full_page=True)
-                    res.update(**{"pass": True, "reason": "已截图", "screenshot": f"/static/{path.name}"})
+                    try:
+                        path = STATIC_DIR / f"{run_id}-{i}.png"
+                        page.screenshot(path=str(path), full_page=True)
+                        res.update(**{"pass": True, "reason": "已截图", "screenshot": f"/static/{path.name}"})
+                    except Exception:
+                        if used == "lightpanda":   # 视觉相关能力缺失不影响执行链路
+                            res.update(**{"pass": True, "reason": "Lightpanda 不支持截图，已跳过留档"})
+                        else:
+                            raise
                 elif action == "click_xy":  # 验证码点选：比例坐标按当前视口换算
                     x, y = _px(step, page, "x", "width"), _px(step, page, "y", "height")
                     page.mouse.click(x, y)
@@ -117,8 +123,12 @@ def _sync_run(case, env, run_id: str, engine: str | None = None) -> dict:
                         _vars["username"], _vars["password"] = case.username, getattr(case, "password", "") or ""
                     retries = max(0, min(3, int(step.get("retries", 1))) if str(step.get("retries", "1")).strip() != "" else 1)
                     r, attempt = {}, 0
+                    from .app_mapper import app_map_brief
+                    _map = app_map_brief(getattr(case, "project_id", "") or "")
                     for attempt in range(retries + 1):
-                        r = ai_drive(page, val, _vars, max_steps=60, run_id=run_id, shot_tag=f"{run_id}-ai{i}")
+                        r = ai_drive(page, val, _vars, max_steps=60, run_id=run_id,
+                                     shot_tag=f"{run_id}-ai{i}", page_map=_map,
+                                     project_id=getattr(case, "project_id", "") or "")
                         if r.get("status") == "passed":
                             break
                     ok = r.get("status") == "passed"

@@ -5,6 +5,7 @@ import './style.css'
 import Login from './views/Login.vue'
 import Dash from './views/Dash.vue'
 import Projects from './views/Projects.vue'
+import AppMap from './views/AppMap.vue'
 import Cases from './views/Cases.vue'
 import Plans from './views/Plans.vue'
 import Runs from './views/Runs.vue'
@@ -19,6 +20,7 @@ const router = createRouter({
     { path: '/login', component: Login },
     { path: '/', component: Dash },
     { path: '/projects', component: Projects },
+    { path: '/appmap', component: AppMap },
     { path: '/cases', component: Cases },
     { path: '/plans', component: Plans },
     { path: '/runs', component: Runs },

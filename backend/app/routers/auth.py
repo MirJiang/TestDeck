@@ -28,7 +28,13 @@ def login(body: LoginIn, db: Session = Depends(get_db)):
     if not user or not verify_pw(body.password, user.password_hash):
         record_login_fail(body.username)
         raise HTTPException(401, "用户名或密码错误")
-    return {"token": make_token(user), "user": {"id": user.id, "username": user.username, "role": user.role}}
+    from fastapi.responses import JSONResponse
+    from ..auth import TOKEN_TTL
+    token = make_token(user)
+    resp = JSONResponse({"token": token, "user": {"id": user.id, "username": user.username, "role": user.role}})
+    # 截图/录像等 <img>/<video> 资源带不了 Authorization 头：同步下发 Cookie 供 /static 鉴权
+    resp.set_cookie("td_token", token, max_age=TOKEN_TTL, samesite="lax", path="/")
+    return resp
 
 
 @router.post("/users")

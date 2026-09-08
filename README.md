@@ -149,6 +149,17 @@ Vue 3 SPA ──▶ FastAPI ──▶ 执行引擎（单线程串行队列）
                           SQLAlchemy 数据库层（默认 SQLite 零配置；生产一键切 MySQL/PostgreSQL）
 ```
 
+### 🔌 MCP 接入（让你的 AI agent 操作测试平台）
+
+平台内置 MCP 服务（`http://<host>:8000/mcp`，Streamable HTTP）。在 Cursor / Claude 等支持 MCP 的客户端加一条配置，你的 agent 就能直接建用例、跑测试、查结果：
+
+```json
+{ "mcpServers": { "testdeck": { "url": "http://localhost:8000/mcp",
+  "headers": { "Authorization": "Bearer <你的平台登录token>" } } } }
+```
+
+可用工具：项目/测试用户/用例查询、执行用例与流程、查看执行明细、创建/删除用例、AI 用量统计（权限跟随登录用户）。
+
 深度说明（核心机制、数据模型、API 全表、引擎回退链）见 [docs/PROJECT.md](docs/PROJECT.md)。
 
 ## 🧪 测试
@@ -171,7 +182,7 @@ cd backend && .venv/Scripts/python -m pytest tests -q   # 76 个单元/接口测
 
 **准备做**
 
-- [ ] Lightpanda 引擎正式支持（视频录像与视觉截图已做能力自检自动降级；正式支持等上游补齐 Windows 构建与截图能力）
+- [ ] Lightpanda 引擎正式支持（执行链路已完整可用：AI 用例/固定步骤/流程均支持，视觉相关能力——录像、视觉截图、截图留档与基线对比——自动降级跳过不影响执行；正式支持等上游补齐 Windows 构建与截图能力）
 
 ## 📄 许可证
 

@@ -1,13 +1,46 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import httpx
 from ..db import get_db
 from ..models import User, NotifyChannel, LLMConfig
-from ..auth import current_user, require_admin
+from ..auth import current_user, require_admin, make_mcp_token
 from .. import ai as A
 
 router = APIRouter(prefix="/api/v1/settings", tags=["settings"])
+
+
+# ---------- MCP 接入（每个用户自己的长时效令牌，系统设置页一键复制） ----------
+
+def _mcp_tools_catalog() -> list[dict]:
+    """MCP 工具清单（名称 + 完整说明），供设置页展示与「复制配置+工具说明」。
+
+    MCP 客户端连接后本会自动 list_tools 发现工具；这里额外把清单交给用户，
+    方便贴进 agent 规则/系统提示词或做人工文档——AI 未连接时也知道平台暴露了什么。
+    """
+    import asyncio
+    try:
+        from ..mcp_server import mcp
+        tools = asyncio.run(mcp.list_tools())
+        return [{"name": t.name, "description": (t.description or "").strip()}
+                for t in tools]
+    except Exception:
+        return []
+
+
+@router.get("/mcp")
+def get_mcp_config(request: Request, user: User = Depends(current_user)):
+    import json
+    from .. import config as _cfg
+    token = make_mcp_token(user)
+    # 反向代理/开发代理会改写 Host：优先用显式配置的对外地址，没配再取请求 Host
+    base = (_cfg.get("TD_PUBLIC_URL") or str(request.base_url)).rstrip("/")
+    url = base + "/mcp"
+    config = {"mcpServers": {"testdeck": {"url": url,
+                                           "headers": {"Authorization": "Bearer " + token}}}}
+    return {"url": url, "token": token,
+            "config_json": json.dumps(config, ensure_ascii=False, indent=2),
+            "tools": _mcp_tools_catalog()}
 
 
 # ---------- 模型配置（多条，单条「使用中」） ----------

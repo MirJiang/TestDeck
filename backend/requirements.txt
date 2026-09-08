@@ -15,3 +15,5 @@ cryptography>=42.0
 pyyaml>=6.0
 jsonpath-ng>=1.6        # 高级断言：JSONPath 表达式（$.data.items[0].id）
 pillow>=10.0            # 流程截图与基线对比（视觉回归）
+mcp>=1.9,<2             # MCP 服务：外部 AI agent 调用平台能力（Streamable HTTP）
+agentscope==2.0.7.post1 # Agent Brain（批次 B）：2.x 年轻须锁版本，升级前跑 tests/test_brain_agentscope.py
