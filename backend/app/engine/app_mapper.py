@@ -88,7 +88,7 @@ def _crawl(base: str, start: str, origin: str, role: str, username: str, passwor
             # 可选登录：交给 AI 代劳一轮（平台哲学：动态页面不写死脚本）
             if username:
                 from .ai_runner import ai_drive
-                r = ai_drive(page, f"用账号 ${{username}} 和密码 ${{password}} 登录当前系统，"
+                r = ai_drive(page, "用账号 ${username} 和密码 ${password} 登录当前系统，"
                                    "直到离开登录页或出现系统首页为止",
                              {"username": username, "password": password},
                              max_steps=15, run_id=f"map{int(__import__('time').time()) % 10**9:09d}",
@@ -111,8 +111,8 @@ def _crawl(base: str, start: str, origin: str, role: str, username: str, passwor
                 pages[path] = {"title": info.get("title", ""), "depth": depth,
                                "links": info.get("links", []), "btns": info.get("btns", [])}
                 if depth < max_depth:
-                    for l in info.get("links", []):
-                        target = l.get("href") or ""
+                    for lk in info.get("links", []):
+                        target = lk.get("href") or ""
                         if target and target not in pages and not target.startswith("#"):
                             queue.append((target, depth + 1))
         finally:
@@ -136,8 +136,8 @@ def _merge_roles(merged: dict, pages: dict, role: str):
             e["disabled"] = e["disabled"] and bool(b.get("disabled"))   # 任一角色可点即算可点
             if role not in e["roles"]:
                 e["roles"].append(role)
-        for l in info.get("links", []):
-            key = (l.get("text", ""), l.get("href", ""))
+        for lk in info.get("links", []):
+            key = (lk.get("text", ""), lk.get("href", ""))
             e = m["links"].setdefault(key, {"roles": []})
             if role not in e["roles"]:
                 e["roles"].append(role)

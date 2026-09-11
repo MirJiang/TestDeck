@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..db import get_db
-from ..models import User, Project, Env, ProjectMember, ProjectUser, AppPage, AppElement
+from ..models import (User, Project, Env, ProjectMember, ProjectUser, AppPage, AppElement,
+                      TestCase, TestPlan, Schedule, TestRun, Flow, GitRepo, CommitSync,
+                      ApiDoc, ApiEndpoint)
 from ..auth import current_user
 from ..perms import check_project_access, accessible_project_ids
 
@@ -53,10 +55,65 @@ def update_project(pid: str, body: ProjectIn, db: Session = Depends(get_db), use
 def delete_project(pid: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     check_project_access(pid, user, db)
     p = get_project(pid, db)
-    for e in db.query(Env).filter(Env.project_id == pid):
-        db.delete(e)
+    run_ids, flow_ids = _purge_project_data(db, pid)
     db.delete(p); db.commit()
+    _remove_static_files(run_ids, flow_ids)
+    from ..scheduler import refresh
+    refresh()   # 反注册已删计划的 cron 任务
     return {"ok": True}
+
+
+def _purge_project_data(db: Session, pid: str):
+    """级联删除项目全部从属数据：用例、流程、计划（含调度行）、执行记录、应用地图、
+    接口文档库、Git 绑定与提交、测试账号池、成员、环境。
+    执行记录无 project_id，经 case/flow/plan 间接关联；返回 run/flow id 供清理静态文件。"""
+    case_ids = [c.id for c in db.query(TestCase).filter(TestCase.project_id == pid)]
+    flow_ids = [f.id for f in db.query(Flow).filter(Flow.project_id == pid)]
+    plan_ids = [p.id for p in db.query(TestPlan).filter(TestPlan.project_id == pid)]
+    repo_ids = [r.id for r in db.query(GitRepo).filter(GitRepo.project_id == pid)]
+    page_ids = [pg.id for pg in db.query(AppPage).filter(AppPage.project_id == pid)]
+
+    runs = db.query(TestRun).filter(
+        TestRun.case_id.in_(case_ids) | TestRun.flow_id.in_(flow_ids) | TestRun.plan_id.in_(plan_ids))
+    run_ids = [r.id for r in runs]
+    for r in runs:
+        db.delete(r)
+
+    def drop(model, **cond):
+        for row in db.query(model).filter_by(**cond):
+            db.delete(row)
+
+    for pg_id in page_ids:
+        drop(AppElement, page_id=pg_id)
+    drop(AppPage, project_id=pid)
+    for plan_id in plan_ids:
+        drop(Schedule, plan_id=plan_id)
+    for repo_id in repo_ids:
+        drop(CommitSync, repo_id=repo_id)
+    drop(GitRepo, project_id=pid)
+    drop(ApiEndpoint, project_id=pid)
+    drop(ApiDoc, project_id=pid)
+    drop(TestCase, project_id=pid)
+    drop(Flow, project_id=pid)
+    drop(TestPlan, project_id=pid)
+    drop(ProjectUser, project_id=pid)
+    drop(ProjectMember, project_id=pid)
+    drop(Env, project_id=pid)
+    return run_ids, flow_ids
+
+
+def _remove_static_files(run_ids, flow_ids):
+    """删除执行产物（截图/录像/差异图，run_id 前缀）与流程截图基线（base-{flow_id}-*）。"""
+    from ..engine.ui_runner import STATIC_DIR
+    if not STATIC_DIR.exists():
+        return
+    patterns = [f"{rid}*" for rid in run_ids] + [f"base-{fid}-*.png" for fid in flow_ids]
+    for pattern in patterns:
+        for f in STATIC_DIR.glob(pattern):
+            try:
+                f.unlink()
+            except OSError:
+                pass
 
 
 # ---------- 环境 ----------

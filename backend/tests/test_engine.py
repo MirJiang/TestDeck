@@ -1,4 +1,3 @@
-import pytest
 from app.engine.runner import substitute, get_field, weak_eq, evaluate_check
 
 

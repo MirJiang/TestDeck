@@ -29,6 +29,12 @@ export async function api(path, opts = {}) {
   } finally { clearTimeout(timer) }
   // 401 视为会话过期跳登录页；但登录接口本身的 401（密码错误）要走正常报错展示
   if (resp.status === 401 && !path.startsWith('/auth/login')) { clearAuth(); location.href = '/'; throw new Error('未登录') }
+  // 滑动续期：后端在令牌剩余有效期不足一半时换发（X-Renewed-Token），本地与 /static 鉴权 Cookie 一并更新
+  const renewed = resp.headers.get('x-renewed-token')
+  if (renewed) {
+    localStorage.setItem(TOKEN_KEY, renewed)
+    document.cookie = `td_token=${renewed}; Max-Age=${7 * 24 * 3600}; path=/; samesite=lax`
+  }
   const data = await resp.json().catch(() => ({}))
   if (!resp.ok) throw new Error(data.detail || `请求失败 (${resp.status})`)
   return data

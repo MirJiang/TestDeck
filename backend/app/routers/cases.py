@@ -4,9 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisco
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..db import get_db, SessionLocal
-from ..models import User, Project, TestCase, Env
+from ..models import User, TestCase, Env
 from ..auth import current_user, resolve_token
-from ..perms import check_project_access, accessible_project_ids
+from ..perms import check_project_access
 
 router = APIRouter(prefix="/api/v1", tags=["cases"])
 

@@ -5,7 +5,6 @@
   url / selector / value
 check 用 contains（页面应包含文字）复用现有展示。
 """
-import os
 import time
 from pathlib import Path
 

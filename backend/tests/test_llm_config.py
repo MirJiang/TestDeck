@@ -1,5 +1,4 @@
 """模型配置（多条列表）：新增/编辑/激活/删除、key 保留、权限。"""
-import os
 
 from app import config
 config.set("TD_DB", ":memory:")

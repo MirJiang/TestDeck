@@ -311,6 +311,24 @@ def build_model_chain(on_usage: Callable[[str, int, int, bool], None] | None = N
     return make_fallback_model(models, on_usage=on_usage)
 
 
+def _thinking_safe_choice(tool_choice, tools):
+    """思考模式模型兼容（B4 实测：DeepSeek 思考模式拒绝 tool_choice="none"/强制函数，400）。
+
+    - mode="none"（上下文压缩摘要用）→ 工具与 choice 一并去掉，等价纯文本补全；
+    - mode=函数名（max_iters 收尾强制结构化输出）→ 降级 auto，提示词已明确要求
+      此时调用结构化输出工具；
+    - 其余（None/auto）原样透传。
+    返回 (tool_choice, tools)。
+    """
+    mode = getattr(tool_choice, "mode", None) if tool_choice else None
+    if mode is None or mode == "auto":
+        return tool_choice, tools
+    if mode == "none":
+        return None, None
+    from agentscope.tool import ToolChoice
+    return ToolChoice(mode="auto"), tools    # 强制函数名 → auto（模型层只认 ToolChoice 对象）
+
+
 def make_fallback_model(models: list, on_usage=None):
     """多模型回退链：按序尝试链上的 OpenAIChatModel，失败自动切下一档。
 
@@ -337,8 +355,9 @@ def make_fallback_model(models: list, on_usage=None):
             last: Exception | None = None
             for m in self.chain:
                 try:
-                    resp = await m._call_api(m.model, messages, tools=tools,
-                                             tool_choice=tool_choice, **kw)
+                    tc, tl = _thinking_safe_choice(tool_choice, tools)
+                    resp = await m._call_api(m.model, messages, tools=tl,
+                                             tool_choice=tc, **kw)
                     u = getattr(resp, "usage", None)
                     if self.on_usage:
                         self.on_usage(m.model,
@@ -358,15 +377,19 @@ def make_fallback_model(models: list, on_usage=None):
 # ---------- 工具层：白名单注册 ----------
 
 def _tool_response(text: str, interrupted: bool = False, image_b64: str | None = None):
+    """工具返回必须用 ToolChunk：本版本 Toolkit 的适配层只识别 ToolChunk，
+    传 ToolResponse 会走 json.dumps 失败兜底 str(result)，把含 base64 的对象 repr
+    整个塞进 TextBlock（实测一张截图 ≈ 13 万 token，几轮就撑爆 128k 上下文）。
+    ToolChunk 的块会原样进入 ToolResultBlock，图片被 formatter 正常提升为 image_url。"""
     from agentscope.message import Base64Source, DataBlock, TextBlock, ToolResultState
-    from agentscope.tool import ToolResponse
+    from agentscope.tool import ToolChunk
     content: list = []
     if image_b64:
         content.append(DataBlock(type="data", source=Base64Source(
             type="base64", media_type="image/jpeg", data=image_b64)))
     content.append(TextBlock(type="text", text=text))
-    return ToolResponse(content=content,
-                        state=ToolResultState.INTERRUPTED if interrupted else ToolResultState.SUCCESS)
+    return ToolChunk(content=content,
+                     state=ToolResultState.INTERRUPTED if interrupted else ToolResultState.SUCCESS)
 
 
 def build_toolkit(h: Harness):

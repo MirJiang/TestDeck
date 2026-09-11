@@ -15,7 +15,7 @@ import time
 import httpx
 from pathlib import Path
 
-from .runner import substitute, get_field, evaluate_check
+from .runner import get_field, evaluate_check
 from .ui_runner import STATIC_DIR
 from .ai_runner import ai_drive
 from .browser import launch_browser
@@ -29,7 +29,6 @@ def _resolve(text, role_vars, shared):
     """先查角色变量，再查共享变量。"""
     if not isinstance(text, str):
         return text
-    import re
     from .runner import VAR_RE
     def rep(m):
         k = m.group(1)

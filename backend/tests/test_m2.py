@@ -1,6 +1,5 @@
 import pytest
 from fastapi.testclient import TestClient
-import os
 
 from app import config
 config.set("TD_DB", ":memory:")

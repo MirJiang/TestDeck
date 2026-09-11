@@ -118,3 +118,14 @@ def test_dispatch_fixed_ui_replay(monkeypatch):
     r = run_ai_case(case, ENV, "R-T4")
     assert r["status"] == "passed"
     assert got["engine"] == "chromium" and got["steps"][0]["action"] == "goto"
+
+
+def test_build_messages_with_image():
+    """多模态消息构造：无图纯文本 content，有图转 image_url 块。"""
+    from app.ai import build_messages
+    text_only = build_messages("sys", "hello")
+    assert isinstance(text_only[1]["content"], str)
+    with_img = build_messages("sys", "hello", image_b64="QUJD")
+    parts = with_img[1]["content"]
+    assert parts[0]["type"] == "image_url" and parts[0]["image_url"]["url"].endswith("QUJD")
+    assert parts[1]["type"] == "text"

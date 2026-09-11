@@ -11,7 +11,7 @@
 
 | 模块 | 能力 |
 |---|---|
-| 认证与用户 | JWT 登录，admin / member 双角色；独立用户管理（建号、重置密码、自助改密） |
+| 认证与用户 | JWT 登录（滑动续期：令牌剩余不足半程自动换发 X-Renewed-Token），admin / member 双角色；独立用户管理（建号、重置密码、自助改密） |
 | 项目 / 环境 | 多项目管理，项目级权限隔离（成员只见自己创建或被加入的项目）；每个项目**一个环境地址 + 附加变量**，并提供**项目级测试用户列表**（账号密码池，支持批量导入），创建用例与流程角色时选择带出、可改 |
 | AI 用例（统一形态） | 目标下分两类：**API 测试**——模型根据目标自主设计请求（方法/路径/头/体）并发送、检查响应、记住 token；**UI 测试**——模型看页面状态（+截图，可选）实时决策点哪/填什么；支持拖拽（滑块验证码）与坐标点击（点选验证码）。可录制/固化为**固定步骤**回放，回归零 token。历史手动 API/UI 用例仍可执行与删除 |
 | 流程测试 | 按业务线串联多角色：每角色独立登录态（API 各自 cookie、UI 各自浏览器会话）；API/UI/AI 步骤混排；**引用已有用例作为一步**（在角色会话内联执行，save 结果直通共享区）；共享变量传递业务单据；截图基线对比（视觉回归）；泳道图展示；执行流式进度、可取消 |
@@ -38,7 +38,7 @@ FastAPI 后端（uvicorn，单进程）
    │    ├─ runner.py       API 用例：变量替换 → httpx → 检查点 → 记住返回值
    │    ├─ ui_runner.py    UI 用例：Playwright 无头浏览器动作编排
    │    ├─ flow_runner.py  流程测试：多角色 API client / 浏览器 context 隔离
-   │    ├─ ai_runner.py    AI 用例门面：ai_drive 按 TD_BRAIN 分派新旧决策循环
+   │    ├─ ai_runner.py    AI 用例门面：ai_drive 委托 brain_agentscope；含 AI-API 请求循环与动作执行层
    │    ├─ brain_agentscope.py  AgentScope Brain：ReAct agent + 白名单工具集 + 多模型回退链
    │    ├─ app_mapper.py   应用地图：多角色爬取合并 / 执行比对信号 / upsert 合并写入
    │    ├─ browser_sessions.py  MCP 浏览器会话：外部 agent 借受控页面干活（独占线程+命令泵）
@@ -55,7 +55,7 @@ FastAPI 后端（uvicorn，单进程）
 
 - **执行队列（默认串行，可开并发）**：所有测试提交到同一个线程池，默认 1 个 worker 天然串行——避免并发写冲突，也杜绝跨线程事件循环问题。团队规模上来后 `.env` 设 `TD_WORKERS=N`（≤16）开启并发执行；SQLite 已配 `busy_timeout`，多 worker 写锁等待自动重试，生产建议切 PostgreSQL/MySQL。
 - **数据库可插拔**：SQLAlchemy 适配层，默认 SQLite（零配置，本地开发与测试）；生产设 `TD_DATABASE_URL` 一键切 PostgreSQL 或 MySQL（Docker 部署已内置 PostgreSQL 16，健康检查就绪后才启动后端）。`python -m app.cli.db_migrate --to <连接串>` 可把现有 SQLite 数据迁入。
-- **AI 决策循环（双路径，迁移期共存）**：默认 legacy 手搓循环——`提取页面状态（可见元素/DOM 文本/可选截图）→ LLM 输出 JSON 动作 → 执行 → 回填历史`；`.env` 设 `TD_BRAIN=agentscope` 切 AgentScope ReAct agent（动作注册为白名单工具、done 走结构化输出、多模型回退链）。两条路径经 `ai_drive` 门面统一，返回结构一致、调用方零改动；`benchmark_brain.py` 基准对比达标后 agentscope 转默认并删除旧循环（PLAN 批次 B4）。防失控机制两路一致：连续 3 次相同动作失败熔断、最大步数上限、取消即停、token 用量入 `llm_logs`。
+- **AI 决策循环（AgentScope，B4 基准达标后唯一路径）**：`ai_drive` 门面委托 AgentScope ReAct agent——动作注册为白名单工具、done 走结构化输出、模型走 llm_configs 多模型回退链（失败自动换下一档）。真实环境基准（登录用例各 3 轮）：成功率 1/3 vs legacy 0/3（通过轮当场解开点选验证码）、平均 22.5s vs 94.7s；token 偏高（≈3 倍，思考模式 + ReAct 重发历史）但绝对值可忽略。防失控机制：连续 3 次相同动作失败熔断、最大步数上限、取消即停、token 用量入 `llm_logs`。模型兼容层（`brain_agentscope`）：思考模式模型（DeepSeek 等）拒绝 tool_choice="none"/强制函数，回退链自动降级；工具函数返回 ToolChunk 保证截图以 image_url 进消息（返回 ToolResponse 会被序列化成文本，一张截图 ≈13 万 token 撑爆上下文）。
 - **渐进式进度**：AI 用例每执行一步、计划每完成一条用例即增量写库；前端轮询渲染，无需长连接。
 
 ## 3. 目录结构
@@ -71,7 +71,6 @@ backend/
     routers/           auth projects cases runs flows plans git ai settings
     engine/            runner ui_runner flow_runner ai_runner brain_agentscope app_mapper browser_sessions ui_recorder browser queue
     cli/git_sync.py    内网无 webhook 时同步提交的命令行
-  benchmark_brain.py   新旧 brain 基准对比脚本（PLAN B4：成功率/平均 token/耗时）
   tests/               单元 + 接口测试（test_*.py）、e2e 脚本、mock 被测系统、假 LLM 服务器
   static/              执行截图（30 天自动清理；禁止对外公开）
 frontend/
@@ -105,7 +104,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 - **固定步骤**：录制或固化的产物（UI: fixed_steps / API: fixed_api_steps），存在且无 goal 时按步骤原样回放，零 token。
 - 每轮发给模型：目标、可用变量（含角色/共享变量）、最近 12 步历史、可见交互元素（选择器含 id/name/placeholder/type/同标签序号兜底）、页面文字摘要；若模型配置勾选「支持视觉」再附当前视口截图。
 - 模型动作集：`goto / click / click_xy / drag / fill / expect_text / save / done`。
-- **Agent Brain 可切换（`TD_BRAIN`）**：默认 legacy 手搓循环；设 `agentscope` 后 `ai_drive` 委托 AgentScope ReAct agent（`engine/brain_agentscope.py`）——动作集注册为白名单工具（权限引擎 DONT_ASK + ALLOW 规则强制，绝不注册 shell/文件/代码执行类工具）、done 走结构化输出、模型走 llm_configs 多模型回退链（失败自动换下一档）、视觉模式经 `browser_look` 工具按需取截图。执行明细/on_step 流式进度/取消/断路器/token 记账与旧循环完全同构，调用方零改动。
+- **AgentScope Brain（唯一决策循环）**：`ai_drive` 委托 AgentScope ReAct agent（`engine/brain_agentscope.py`）——动作集注册为白名单工具（权限引擎 DONT_ASK + ALLOW 规则强制，绝不注册 shell/文件/代码执行类工具）、done 走结构化输出、模型走 llm_configs 多模型回退链（失败自动换下一档）、视觉模式经 `browser_look` 工具按需取截图（实测可解开点选验证码）。执行明细/on_step 流式进度/取消/断路器/token 记账与页面状态注入与旧循环同构，调用方零改动。
 - 防失控：连续 3 次相同动作失败熔断；最大步数上限；每次执行记录 token 用量。
 - 固化：AI 跑通后可把操作明细转存为普通 UI 用例，回归零 token。
 
@@ -150,7 +149,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 `test_runs` **统一执行记录**（单用例 `case_id` / 单流程 `flow_id` / 整计划 `plan_id` 三种来源，流程历史也查此表）·
 `flows` 流程定义 ·
 `git_repos` 仓库绑定（含 webhook secret）· `commit_syncs` 同步的提交 · `notify_channels` 告警渠道（含 webhook 地址）·
-`llm_configs` 模型配置（**含 API Key 明文**）· `llm_logs` LLM 调用与 token 用量 ·
+`llm_configs` 模型配置（API Key 静态加密）· `llm_logs` LLM 调用与 token 用量 ·
 `app_pages`/`app_elements` **应用地图**（期望基线：页面与按钮/链接，含 `source` 来源 scan/code/manual、`roles` 可见角色、元素 `state_note` 出现条件备注）。
 
 > 旧版独立 `flow_runs` 表已在启动迁移中并入 `test_runs`（数据自动搬运后删表）。
@@ -181,7 +180,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 |---|---|---|
 | `TD_DB` | `backend/testdeck.db` | SQLite 路径，本地开发/测试默认 |
 | `TD_DATABASE_URL` | 未设 | 生产数据库连接串（PostgreSQL/MySQL），设置后优先于 SQLite |
-| `TD_SECRET` | 自动生成 | JWT 签名密钥：未配置时自动生成随机密钥并持久化到 `backend/.secret_key`（已 gitignore），绝不使用默认常量；生产多实例/重建容器请在 `.env` 显式固定 |
+| `TD_SECRET` | 自动生成 | JWT 签名密钥，同时派生凭据加密根（`app/crypto.py`，LLM Key 与告警 webhook 静态加密）：未配置时自动生成随机密钥并持久化到 `backend/.secret_key`（已 gitignore），绝不使用默认常量；生产多实例/重建容器请在 `.env` 显式固定。**轮换 TD_SECRET 会使已存密文不可解**（读回为空，需重新录入 Key） |
 | `TD_ADMIN_PASSWORD` | `admin123` | 初始 admin 密码，**生产必须修改** |
 | `TD_SEED_DEMO` | `1` | 是否预置询价单演示数据 |
 | `TD_NO_SCHEDULER` | 未设 | 设为 1 禁用调度（测试用） |
@@ -192,7 +191,6 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 | `TD_SHOT_DIFF` | `1` | 设为 0 关闭流程截图基线对比 |
 | `TD_SHOT_DIFF_PCT` | `2` | 截图与基线的差异阈值（百分比，超过判失败） |
 | `TD_BROWSER_ENGINE` | `chromium` | `lightpanda` 启用轻量引擎 |
-| `TD_BRAIN` | `legacy` | `agentscope` 切换 AI 决策循环为 AgentScope ReAct agent（PLAN 批次 B 迁移期开关，基准对比达标后转默认） |
 | `TD_BROWSER_SESSION_TTL` | `1800` | MCP 浏览器会话空闲回收秒数 |
 | `TD_LIGHTPANDA_URL` | `http://127.0.0.1:9222` | Lightpanda CDP 地址 |
 | `TD_LIGHTPANDA_BIN` | 未设 | lightpanda 可执行文件路径，设置后平台自动拉起 |
@@ -202,6 +200,11 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 多厂商配置列表（智谱/DeepSeek/通义/Kimi/MiniMax/OpenAI/Claude/Gemini/OpenRouter/Ollama 等 19 项预置），每条含：
 接入方式（按量 API / Token 套餐，Key 各自独立）、Base URL、API Key（存库，回显脱敏）、模型名（可在线拉取厂商 `/models` 列表）、
 「支持视觉」开关（勾选后 AI 用例每步附截图，token 约增 1~2k/步）、连接测试。其中一条设为「使用中」，AI 功能全部走它；无使用中条目时回退 .env 兜底配置。
+
+### 7.1 结构迁移与凭据加密
+
+- **结构迁移（Alembic）**：表结构变更一律走 `backend/migrations/versions`，启动自动应用（有版本行 → upgrade head；已有业务表但无版本行 → stamp 打基线；全新库 → 建到最新；内存库跳过；失败只记日志不阻断启动）。改 `app/models.py` 后生成增量迁移：`cd backend && .venv/Scripts/python -m alembic revision --autogenerate -m "..."`，人工过目后随代码提交。
+- **凭据加密**：`llm_configs.api_key` 与 `notify_channels.url` 落库自动 Fernet 加密（`enc:v1:` 前缀），读取透明解密；存量明文由启动迁移补加密（幂等）。密钥从 TD_SECRET 派生，轮换 TD_SECRET 后旧密文读回为空，需在界面重新录入。
 
 ## 8. 部署
 
@@ -215,7 +218,6 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 
 ```bash
 cd backend && .venv/Scripts/python -m pytest tests -q     # 107 个单元/接口测试
-# 新旧 brain 基准对比（真实环境，PLAN B4）：.venv/Scripts/python benchmark_brain.py <case_id> -n 3
 # E2E（需先起后端与 mock 被测系统 9001）：
 tests/e2e.py e2e_m2.py e2e_m3.py e2e_m5.py e2e_flow.py
 # 假 LLM 服务器（AI 引擎联调用）：uvicorn tests.fake_llm:app --port 9111
@@ -227,7 +229,7 @@ tests/e2e.py e2e_m2.py e2e_m3.py e2e_m5.py e2e_flow.py
 
 | 路径 | 内容 |
 |---|---|
-| `backend/testdeck.db` | **全部运行数据**：模型 API Key 明文、账号密码哈希、告警 webhook 地址（含 access_token）、执行记录与被测系统响应 |
+| `backend/testdeck.db` | **全部运行数据**：模型 API Key 与告警 webhook（**静态加密存储**，密钥源自 TD_SECRET）、账号密码哈希、执行记录与被测系统响应 |
 | `backend/.secret_key`、`backend/.token_epoch` | JWT 签名密钥（未配 TD_SECRET 时自动生成）与令牌版本（已 gitignore） |
 | `backend/static/` | 执行截图与录像（可能含被测系统页面与业务数据）——**已加登录鉴权**：浏览器走登录时下发的 `td_token` Cookie，程序访问带 `Authorization: Bearer` |
 | `backend/.venv/`、`frontend/node_modules/`、`frontend/dist/` | 本地产物/构建产物 |

@@ -212,10 +212,10 @@ def regression_advice(db: Session = Depends(get_db), user: User = Depends(curren
                                 "last_run": last.created_at.isoformat() if last else "从未执行"})
     week_ago = datetime.utcnow() - timedelta(days=7)
     hot = []
-    from ..models import CommitSync, Project
+    from ..models import CommitSync
     for cm in (db.query(CommitSync).filter(CommitSync.created_at > week_ago)
                .order_by(CommitSync.created_at.desc()).limit(50).all()):
-        proj = db.get(Project, cm.repo_id)  # repo→project 映射在列表页拼
+        # repo→project 映射在列表页拼
         hot.append({"message": cm.message, "author": cm.author, "sha": cm.sha[:8],
                     "created_at": cm.created_at.isoformat()})
     return {"stale_cases": stale[:10], "stale_flows": stale_flows[:10], "recent_commits": hot[:10],

@@ -1,0 +1,16 @@
+# Ruff lint：本仓库选择「错误级 + pyflakes」小规则集，保证增量代码的基本健康度。
+# 风格类规则（引号/导入排序/行宽等）不设限——按需自行约束，避免一次性大改动。
+# 运行：在 backend/ 下 .venv/Scripts/python -m ruff check app tests
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+# E402 import 不在文件顶部：本代码库惯例（config 先初始化、路由按序挂载）
+# E701/E702 分号单行语句：本代码库惯例（db.add(x); db.commit()）
+# E731 lambda 赋值：报告导出等处少量使用
+ignore = ["E402", "E701", "E702", "E731"]
+
+[lint.per-file-ignores]
+# 测试文件允许：故意重定义辅助函数（login）、未使用的局部变量（保留语义）
+"tests/*" = ["F811", "F841"]

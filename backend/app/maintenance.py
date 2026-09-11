@@ -36,8 +36,8 @@ def cleanup_runs() -> dict:
         for r in runs:
             db.delete(r)
         logs = db.query(LLMLog).filter(LLMLog.created_at < cutoff_dt).all()
-        for l in logs:
-            db.delete(l)
+        for log in logs:
+            db.delete(log)
         db.commit()
         return {"runs": len(runs), "logs": len(logs)}
     except Exception:

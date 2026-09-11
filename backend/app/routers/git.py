@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..db import get_db
-from ..models import User, Project, GitRepo, CommitSync, TestPlan, Env
+from ..models import User, GitRepo, CommitSync, TestPlan, Env
 from ..auth import current_user
 from ..perms import check_project_access, accessible_project_ids
 

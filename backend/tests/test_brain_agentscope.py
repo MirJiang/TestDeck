@@ -350,11 +350,10 @@ def test_chain_entries_from_llm_configs(stub_llm):
     db.query(LLMConfig).delete(); db.commit(); db.close()
 
 
-# ---------- B2：ai_drive 门面路由（TD_BRAIN 开关） ----------
+# ---------- B4：ai_drive 门面（AgentScope 唯一路径） ----------
 
-def test_ai_drive_facade_routes_by_flag(monkeypatch):
-    """TD_BRAIN=agentscope 时 ai_drive 委托 run_brain，返回结构去掉内部标注；
-    默认（legacy）走旧循环，调用方零改动。"""
+def test_ai_drive_facade_delegates(monkeypatch):
+    """ai_drive 委托 run_brain，返回结构去掉内部标注，参数原样透传。"""
     from app.engine import ai_runner
 
     captured = {}
@@ -367,25 +366,13 @@ def test_ai_drive_facade_routes_by_flag(monkeypatch):
                 "brain": "agentscope", "usage": [{"model": "m", "input_tokens": 1}]}
     monkeypatch.setattr("app.engine.brain_agentscope.run_brain", fake_run_brain)
 
-    config.set("TD_BRAIN", "agentscope")
-    try:
-        r = ai_runner.ai_drive(FakePage(), "目标", {"username": "a"}, max_steps=9,
-                               run_id="r1", project_id="p9", page_map="地图")
-    finally:
-        config.unset("TD_BRAIN")
-
+    r = ai_runner.ai_drive(FakePage(), "目标", {"username": "a"}, max_steps=9,
+                           run_id="r1", project_id="p9", page_map="地图")
     assert r["status"] == "passed" and r["saved"] == {"k": "v"}
     assert "brain" not in r and "usage" not in r          # 内部标注不外泄
     assert captured["kw"]["project_id"] == "p9"           # 参数原样透传
     assert captured["kw"]["max_steps"] == 9
-
-    # 默认走旧循环：stub LLM 一轮 done，不经过 run_brain
-    monkeypatch.setattr("app.ai.llm_available", lambda: True)
-    monkeypatch.setattr("app.ai.chat_json_sync",
-                        lambda *a, **k: {"action": "done", "pass": True, "reason": "旧循环"})
-    r2 = ai_runner.ai_drive(FakePage(), "目标", {}, max_steps=3)
-    assert r2["status"] == "passed" and r2["summary"] == "旧循环"
-    assert "brain" not in r2
+    assert captured["kw"]["page_map"] == "地图"
 
 
 # ---------- 视觉（B4 前半：截图进消息） ----------
@@ -393,7 +380,6 @@ def test_ai_drive_facade_routes_by_flag(monkeypatch):
 def test_vision_look_tool(stub_llm, monkeypatch):
     """视觉模式注册 look 工具；模型 look 后拿到截图 DataBlock 再决策坐标。"""
     monkeypatch.setattr(B.A, "vision_enabled", lambda: True)
-    from agentscope.message import DataBlock
     script = [
         [_tc("browser_look", think="先看截图")],
         [_tc("browser_click_xy", think="点滑块", x=50, y=300)],

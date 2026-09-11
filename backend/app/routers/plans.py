@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..db import get_db
-from ..models import User, Project, TestPlan
+from ..models import User, TestPlan
 from ..auth import current_user
 from ..perms import check_project_access, accessible_project_ids
 
@@ -38,6 +38,7 @@ def create_plan(body: PlanIn, db: Session = Depends(get_db), user: User = Depend
     check_project_access(body.project_id, user, db)
     p = TestPlan(**body.model_dump())
     db.add(p); db.commit()
+    sync_schedule(db, p)
     return {"id": p.id}
 
 
@@ -64,6 +65,8 @@ def delete_plan(pid: str, db: Session = Depends(get_db), user: User = Depends(cu
     for s in db.query(Schedule).filter(Schedule.plan_id == pid):
         db.delete(s)
     db.delete(p); db.commit()
+    from ..scheduler import refresh
+    refresh()   # 同步移除 APScheduler 中已删计划的任务
     return {"ok": True}
 
 

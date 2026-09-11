@@ -1,5 +1,4 @@
 """M4：项目权限隔离 + 通知渠道 + 报告导出。"""
-import os
 
 from app import config
 config.set("TD_DB", ":memory:")

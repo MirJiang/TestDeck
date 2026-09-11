@@ -143,7 +143,6 @@ def test_closed_session_post_raises():
     sess = get_session(sess_id, "u1")
     sess.close()
     sess.closed = True
-    import concurrent.futures
     with pytest.raises(RuntimeError):
         sess.post(sess.do_state).result(timeout=2)
 

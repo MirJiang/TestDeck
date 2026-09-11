@@ -15,6 +15,8 @@ from . import scheduler
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(engine)
     _migrate()
+    _encrypt_credentials()
+    _alembic_upgrade()
     _seed()
     scheduler.start()
     from .maintenance import register_daily, cleanup_screenshots
@@ -60,6 +62,56 @@ def _migrate():
                 with engine.begin() as conn:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
     _migrate_flow_runs()
+
+
+def _encrypt_credentials():
+    """存量明文凭据补加密（2026-09 起 api_key / 告警 webhook 静态加密）。
+
+    直接在 SQL 层读写（绕过列的透明加解密）；幂等：带 enc:v1: 前缀的已加密值跳过。"""
+    from sqlalchemy import inspect, text
+    from .crypto import encrypt
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table, col in [("llm_configs", "api_key"), ("notify_channels", "url")]:
+            if table not in insp.get_table_names():
+                continue
+            for rid, val in conn.execute(text(f"SELECT id, {col} FROM {table}")).all():
+                if val and not str(val).startswith("enc:v1:"):
+                    conn.execute(text(f"UPDATE {table} SET {col} = :v WHERE id = :id"),
+                                 {"v": encrypt(str(val)), "id": rid})
+
+
+def _alembic_upgrade():
+    """Alembic 结构迁移：此后表结构变更一律写 migrations/versions，启动自动应用。
+
+    - alembic_version 有版本行：upgrade head 应用新迁移；
+    - 无版本行但已有业务表（含残留空版本表的场景）：结构已由 create_all + 轻量迁移
+      补齐 → stamp 打基线，绝不把基线 upgrade 跑在已有表上；
+    - 全新空库：upgrade head 直接建到最新；内存库（测试）跳过。
+    迁移失败只记日志不阻断启动——表结构兜底仍是 create_all + 轻量迁移。"""
+    from .db import resolve_database_url
+    if resolve_database_url() == "sqlite://":   # 内存库（测试）
+        return
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import inspect, text
+    base = _P(__file__).resolve().parent.parent
+    cfg = Config(str(base / "alembic.ini"))
+    cfg.set_main_option("script_location", str(base / "migrations"))
+    try:
+        with engine.connect() as conn:
+            rows = []
+            if inspect(conn).has_table("alembic_version"):
+                rows = conn.execute(text("SELECT version_num FROM alembic_version")).fetchall()
+            table_n = len(inspect(conn).get_table_names())
+        if rows:
+            command.upgrade(cfg, "head")
+        elif table_n:
+            command.stamp(cfg, "head")
+        else:
+            command.upgrade(cfg, "head")
+    except Exception as e:
+        print(f"[TestDeck] Alembic 迁移失败（启动继续，结构兜底为 create_all）：{type(e).__name__}: {e}")
 
 
 def _migrate_flow_runs():

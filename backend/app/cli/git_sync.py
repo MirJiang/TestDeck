@@ -7,7 +7,6 @@
 """
 import argparse
 import subprocess
-import json
 import sys
 import httpx
 

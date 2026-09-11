@@ -210,13 +210,18 @@ def test_ai_drive_records_warning(client, token, monkeypatch):
         def screenshot(self, path="", full_page=False, type=None, quality=None):
             return b"shot"
 
-    script = iter([
-        {"action": "click", "selector": "#btn", "think": "点登录"},
-        {"action": "expect_text", "value": "登录成功", "think": "验证"},
-        {"action": "done", "pass": True, "reason": "ok"},
-    ])
+    # B4 后 ai_drive 唯一路径是 AgentScope brain：用桩模型链驱动（复用 brain 测试基建）
+    from app.engine import brain_agentscope as B
+    from test_brain_agentscope import _stub_model_factory, _tc
     monkeypatch.setattr("app.ai.llm_available", lambda: True)
-    monkeypatch.setattr("app.ai.chat_json_sync", lambda *a, **k: next(script))
+    monkeypatch.setattr("app.ai.vision_enabled", lambda: False)
+    monkeypatch.setattr("app.ai._log_usage", lambda *a, **k: None)
+    script = [
+        [_tc("browser_click", think="点登录", selector="#btn")],
+        [_tc("browser_expect_text", think="验证", value="登录成功")],
+        [_tc("GenerateStructuredOutput", passed=True, reason="ok")],
+    ]
+    monkeypatch.setattr(B, "build_model_chain", lambda on_usage=None: _stub_model_factory(script))
 
     r = ai_drive(Page(), "登录", {}, max_steps=6, project_id=pid)
     assert r["status"] == "passed" and r["fail_n"] == 0        # 警告不影响判定

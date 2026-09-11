@@ -12,7 +12,7 @@ from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 from ..db import Base, SessionLocal
-from .. import models  # noqa: 注册所有表
+from .. import models  # noqa: F401  注册所有表
 
 ORDER = ["users", "projects", "project_members", "envs", "test_cases", "test_plans",
          "schedules", "test_runs", "flows", "git_repos", "commit_syncs",

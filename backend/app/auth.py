@@ -2,7 +2,7 @@ import time
 import hashlib
 import bcrypt
 from jose import jwt, JWTError
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
@@ -126,7 +126,8 @@ def resolve_token(token: str, db) -> User | None:
     return db.get(User, payload["sub"])
 
 
-def current_user(cred: HTTPAuthorizationCredentials = Depends(bearer), db: Session = Depends(get_db)) -> User:
+def current_user(cred: HTTPAuthorizationCredentials = Depends(bearer), db: Session = Depends(get_db),
+                 response: Response = None) -> User:
     if cred is None:
         raise HTTPException(401, "未登录")
     try:
@@ -138,6 +139,10 @@ def current_user(cred: HTTPAuthorizationCredentials = Depends(bearer), db: Sessi
     user = db.get(User, payload["sub"])
     if not user:
         raise HTTPException(401, "用户不存在")
+    # 滑动续期：剩余有效期不足一半时换发新令牌，活跃用户无感续命（前端 api.js 拦截
+    # X-Renewed-Token 更新本地存储与 td_token Cookie）；MCP 长时效令牌走 resolve_token，不在此续。
+    if response is not None and payload.get("exp", 0) - time.time() < TOKEN_TTL * 0.5:
+        response.headers["X-Renewed-Token"] = make_token(user)
     return user
 
 

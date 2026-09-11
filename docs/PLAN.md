@@ -2,11 +2,14 @@
 
 > 本文档是内部迭代排期；产品级 Roadmap 见 README。批次内的条目按序执行，跨批次可并行启动不冲突的部分。
 
-> **执行进度（2026-09-08）**：批次 A（A1/A2/A3）已全部落地并测试覆盖；批次 B 的 B1/B2/B3 已落地
-> （`engine/brain_agentscope.py` + `TD_BRAIN` 开关 + `benchmark_brain.py` 对比脚本，14 项前置验证测试全过），
-> B4 的视觉部分（browser_look 工具）已落地，**基准对比待在真实环境跑**——达标后 `.env` 设
-> `TD_BRAIN=agentscope` 切默认并删除旧循环；批次 C 的 C1（skills/app-map-source-scan）与
-> C2（browser_* 六件套 MCP 工具）已落地。后端 107 测试全过、前端构建通过，待所有者确认后 commit。
+> **执行进度（2026-09-12）**：批次 A/B/C 全部完成。B4 已收尾：真实环境基准对比达标
+> （智链测试项目·货主登录用例，新旧各 3 轮——agentscope 成功率 1/3、平均 22.5s，通过轮当场解开点选验证码；
+> legacy 0/3、平均 94.7s，全部被验证码耗尽步数；另单轮验证 agentscope 也解开验证码通过，17.3s）。
+> AgentScope 转为唯一决策循环，legacy 手搓循环与 `benchmark_brain.py` 已删除，`TD_BRAIN` 开关移除。
+> 迁移中发现并修复两个模型兼容问题：
+> ① DeepSeek 等思考模式模型拒绝 tool_choice="none"/强制函数（400）——回退链层降级兼容（none→去工具、强制→auto）；
+> ② 工具函数必须返回 ToolChunk——返回 ToolResponse 会被适配层 str() 成含 base64 的对象 repr 文本，
+> 一张截图 ≈ 13 万 token，几轮撑爆 128k 上下文。
 
 ## 批次 A：应用地图可靠性（平台内闭环）
 
@@ -39,4 +42,4 @@
 ## 已排队的其他事项
 
 - 已完成未提交的代码批次（MCP 服务、应用地图 v1、安全加固、若干 UI 调整）待所有者确认后 commit
-- 技术债清单（按需）：凭据加密存储、CI/lint、登录滑动续期、Alembic 迁移
+- 技术债清单：**四项已于 2026-09-12 完成**——凭据静态加密（api_key/webhook，TD_SECRET 派生密钥）、CI 补 ruff lint（`.github/workflows/ci.yml` + `backend/ruff.toml`，顺带修掉 format_endpoints 未导入的存量 bug）、登录滑动续期（X-Renewed-Token）、Alembic 迁移（基线 + 启动自动 stamp/upgrade）

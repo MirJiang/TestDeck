@@ -1,9 +1,8 @@
-import json
-import time
 import secrets
 from datetime import datetime
 from sqlalchemy import (Column, Integer, String, Text, Boolean, DateTime, Float, JSON)
 from .db import Base
+from .crypto import EncryptedString
 
 # 说明：列统一带长度（MySQL 要求主键/唯一列必须有长度）；
 # 不使用数据库级外键约束，实体关系由应用层维护（各 DB 方言行为一致）。
@@ -181,7 +180,7 @@ class NotifyChannel(Base):
     __tablename__ = "notify_channels"
     id = Column(String(64), primary_key=True, default=uid)
     name = Column(String(128), nullable=False)
-    url = Column(String(512), nullable=False)          # 钉钉/企微 群机器人 webhook
+    url = Column(EncryptedString, nullable=False)      # 钉钉/企微 群机器人 webhook（含 access_token，静态加密）
     on_fail = Column(Boolean, default=True)
     enabled = Column(Boolean, default=True)
     last_status = Column(String(64), default="")
@@ -200,7 +199,7 @@ class LLMConfig(Base):
     vendor = Column(String(64), default="")                # 厂商名
     url_type = Column(String(16), default="api")           # api | plan | plan2
     base_url = Column(String(512), default="")
-    api_key = Column(String(512), default="")
+    api_key = Column(EncryptedString, default="")          # 厂商 API Key（静态加密，回显脱敏在路由层）
     model = Column(String(128), default="glm-4-flash")
     vision = Column(Boolean, default=False)                # 模型支持图片输入（视觉识别验证码等）
     is_active = Column(Boolean, default=False)             # 使用中（全局唯一）

@@ -1,5 +1,4 @@
 """UI 录制器：事件编译与指令通道（不启动浏览器）。"""
-import os
 
 from app import config
 config.set("TD_DB", ":memory:")

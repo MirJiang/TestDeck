@@ -104,7 +104,9 @@ async function save() {
 }
 
 async function del(p) {
-  if (!await confirmDialog(`删除项目「${p.name}」及其环境配置？`, { danger: true, okText: '删除' })) return
+  if (!await confirmDialog(
+    `删除项目「${p.name}」将一并永久删除其下所有关联数据，包括：测试用例、流程测试、测试计划（含定时任务）、执行记录与报告、应用地图、接口文档库、Git 绑定与提交、测试账号池和环境配置，且不可恢复。确认删除？`,
+    { danger: true, okText: '全部删除' })) return
   await api('/projects/' + p.id, { method: 'DELETE' }); load()
 }
 </script>

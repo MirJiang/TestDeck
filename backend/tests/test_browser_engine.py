@@ -1,5 +1,4 @@
 """浏览器引擎选择逻辑（不启动真浏览器）。"""
-import os
 
 from app import config
 config.set("TD_DB", ":memory:")
@@ -8,7 +7,6 @@ import pytest
 
 from app.engine import browser
 from app import config
-from app.engine import browser
 from app.engine.browser import launch_browser, browser_engine
 
 
