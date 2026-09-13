@@ -248,6 +248,23 @@ async function delRow(r) {
     <div><div class="k">失败</div><div class="v" :style="usage.failed ? 'color:var(--err)' : ''">{{ usage.failed }}</div></div>
   </div>
 
+  <div class="panel" v-if="usage?.daily?.length">
+    <h3>近 14 天用量</h3>
+    <table>
+      <thead><tr><th>日期</th><th>调用</th><th>输入 Tokens</th><th>输出 Tokens</th><th>合计</th><th>失败</th></tr></thead>
+      <tbody>
+        <tr v-for="d in usage.daily" :key="d.date">
+          <td class="mono">{{ d.date }}</td>
+          <td>{{ d.calls }}</td>
+          <td class="mono">{{ d.prompt_tokens.toLocaleString() }}</td>
+          <td class="mono">{{ d.completion_tokens.toLocaleString() }}</td>
+          <td class="mono">{{ (d.prompt_tokens + d.completion_tokens).toLocaleString() }}</td>
+          <td :style="d.failed ? 'color:var(--err)' : ''">{{ d.failed || '—' }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
   <div class="panel">
     <table v-if="items.length">
       <thead><tr><th>状态</th><th>名称</th><th>厂商</th><th>模型</th><th>接入</th><th>Base URL</th><th></th></tr></thead>

@@ -86,6 +86,18 @@ def test_ai_gen_from_text(client, ctx):
     assert d["steps"] and d["steps"][0]["url"]
 
 
+def _wait_run(client, H, rid, timeout=20):
+    """触发接口立即返回 running，轮询直到结束（与前端行为一致）。"""
+    import time
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        d = client.get(f"/api/v1/runs/{rid}", headers=H).json()
+        if d.get("status") and d["status"] != "running":
+            return d
+        time.sleep(0.2)
+    raise AssertionError("执行轮询超时")
+
+
 def test_ai_analyze_run(client, ctx):
     H, pid, eid = ctx
     # 造一个失败执行
@@ -93,6 +105,7 @@ def test_ai_analyze_run(client, ctx):
                       "steps": [{"m": "GET", "url": "/api/none", "check": {"type": "status", "expect": "200"}}]},
                       headers=H).json()["id"]
     run = client.post(f"/api/v1/runs/cases/{cid}/run", json={"env_id": eid}, headers=H).json()
+    run = _wait_run(client, H, run["id"])
     assert run["status"] == "failed"
     r = client.post(f"/api/v1/ai/analyze-run/{run['id']}", headers=H).json()
     assert r["cause"] and r["suggestion"]

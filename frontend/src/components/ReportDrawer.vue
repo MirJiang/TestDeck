@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { api, getToken } from '../api'
 
 const props = defineProps({ runId: String })
@@ -9,6 +9,17 @@ const run = ref(null)
 onMounted(async () => { run.value = await api('/runs/' + props.runId) })
 
 const stepsOf = (d) => Array.isArray(d) && d.length && 'idx' in d[0]
+
+// 过程折叠：默认只展开最后的 done 结论步骤（含截图）与录像
+const folded = ref(true)
+const tail = computed(() => {
+  const d = run.value?.detail
+  const list = Array.isArray(d) && d.length && 'idx' in d[0] ? d : []
+  const doneIdx = list.map((s, i) => (s.action === 'done' ? i : -1)).filter(i => i >= 0)
+  const start = doneIdx.length ? doneIdx[doneIdx.length - 1] : Math.max(0, list.length - 1)
+  return { start, list: list.slice(start) }
+})
+const foldCount = computed(() => tail.value.start)
 
 const srcOf = (r) => r.plan_name
   ? (r.flow_name ? `${r.plan_name} · 流程 ${r.flow_name}` : `计划 · ${r.plan_name}`)
@@ -37,7 +48,6 @@ async function exportHtml() {
       <template v-if="run">
         <div style="display:flex;gap:26px;margin-bottom:14px;font-size:13px">
           <div><div class="muted" style="font-size:11.5px">来源</div><b>{{ srcOf(run) }}</b></div>
-          <div><div class="muted" style="font-size:11.5px">环境</div><b>{{ run.env_name }}</b></div>
           <div><div class="muted" style="font-size:11.5px">触发</div><b>{{ run.trigger_by }}</b></div>
           <div><div class="muted" style="font-size:11.5px">总耗时</div><b class="mono">{{ run.duration }}s</b></div>
         </div>
@@ -47,7 +57,11 @@ async function exportHtml() {
         </div>
 
         <template v-if="stepsOf(run.detail)">
-          <div v-for="s in run.detail" :key="s.idx" style="border:1px solid var(--line);border-radius:7px;padding:10px 12px;margin-bottom:8px">
+          <div v-if="foldCount > 0" style="border:1px dashed var(--line);border-radius:7px;padding:7px 12px;margin-bottom:8px;display:flex;gap:8px;align-items:center">
+            <span class="muted" style="font-size:12.5px">{{ folded ? '已折叠 ' + foldCount + ' 步过程明细' : '过程明细已全部展开（' + run.detail.length + ' 步）' }}</span>
+            <button class="btn sm" @click="folded = !folded">{{ folded ? '展开全部' : '收起，只看结论' }}</button>
+          </div>
+          <div v-for="s in (folded ? tail.list : run.detail)" :key="s.idx" style="border:1px solid var(--line);border-radius:7px;padding:10px 12px;margin-bottom:8px">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <span :class="s.pass ? 'st ok' : 'st err'">{{ s.pass ? '通过' : '未通过' }}</span>
               <span v-if="s.role_name" class="chip">{{ s.role_name }}</span>

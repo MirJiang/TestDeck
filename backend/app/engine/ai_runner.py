@@ -8,58 +8,47 @@
 多模型回退链。本模块保留 AI-API 请求循环（run_ai_api_case）与动作执行层（_exec_action）。
 """
 import time
+from urllib.parse import urljoin
 
 import httpx
 
 from .. import ai as A
 from .api_docs import format_endpoints
 from .runner import substitute, evaluate_check, get_field
+from .web_interact import HELPERS_JS
 from .ui_runner import STATIC_DIR
 from .browser import launch_browser
 from . import queue as _q
 
 STATIC_DIR.mkdir(exist_ok=True)
 
-DEFAULT_MAX_STEPS = 30
+DEFAULT_MAX_STEPS = 200
 
-# 提取页面状态：可见的交互元素（选择器/文字/当前值）+ 标题 + 文字摘要
-# 选择器兜底顺序：id > name > placeholder 属性 > type 属性 > 同标签可见序号。
-# 注意不能用 :has-text 兜底输入框——它只匹配内部文字，input 永远不匹配。
-_STATE_JS = """
-() => {
-  const visible = el => { const r = el.getBoundingClientRect(); return r.width && r.height && r.bottom >= 0 && r.top <= innerHeight; };
+# 提取页面状态：通用可交互元素清单（判定标准见 web_interact.HELPERS_JS，无站点特定规则）。
+# 选择器优先级：id > data-testid/name > placeholder/type > aria-label > 精确文本 > 同标签序号。
+# checkbox/radio/file 不进清单（模型用不上、费 token）；无名可点元素（纯图标无 aria-label）也不进。
+_STATE_JS = "() => {" + HELPERS_JS + """
   const out = [];
   const seen = new Set();
-  for (const t of document.querySelectorAll('a, button, input, select, textarea, [onclick]')) {
-    if (!visible(t)) continue;
-    const tag = t.tagName.toLowerCase();
-    if (tag === 'input' && ['hidden', 'checkbox', 'radio', 'file'].includes(t.type)) continue;
-    let sel = '';
-    if (t.id) sel = '#' + t.id;
-    else if (t.name) sel = tag + '[name="' + t.name + '"]';
-    else if ((tag === 'input' || tag === 'textarea') && t.placeholder) sel = tag + '[placeholder="' + t.placeholder.slice(0, 30) + '"]';
-    else if (tag === 'input' && t.type && t.type !== 'text') sel = tag + '[type="' + t.type + '"]';
-    else if (tag !== 'input' && tag !== 'textarea') {
-      const text = String(t.innerText || '').trim().slice(0, 24);
-      if (text) sel = tag + ':has-text("' + text.replace(/"/g, '\\\\"') + '")';
-    }
-    if (!sel) {  // 同标签可见序号，Playwright 稳定可执行
-      const peers = [...document.querySelectorAll(tag)].filter(visible);
-      sel = tag + ' >> nth=' + peers.indexOf(t);
-    }
-    const label = t.innerText || t.value || t.placeholder || t.title || '';
-    const text = String(label).trim().slice(0, 24);
-    const key = sel;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ selector: sel, tag: tag, text: text, value: String(t.value || '').slice(0, 40) });
-    if (out.length >= 40) break;
+  for (const el of document.querySelectorAll('body *')) {
+    if (out.length >= 60) break;
+    const tag = el.tagName;
+    const type = (el.type || '').toLowerCase();
+    if (tag === 'INPUT' && ['checkbox', 'radio', 'file'].includes(type)) continue;
+    if (!__vis(el) || !__inter(el)) continue;
+    const label = __label(el);
+    if (!label && !['INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) continue;
+    if (label.length > 80) continue;   // 长文本 = 容器，不是单个可点元素
+    const sel = __sel(el);
+    if (seen.has(sel)) continue;
+    seen.add(sel);
+    out.push({ selector: sel, tag: tag.toLowerCase(), text: label.slice(0, 24),
+               value: String(el.value || '').slice(0, 40) });
   }
   return { url: location.href, title: String(document.title || '').slice(0, 60),
            elements: out, vw: innerWidth, vh: innerHeight,
-           text: String(document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 700) };
-}
-"""
+           text: String(document.body.innerText || '').replace(/[ \\t\\n]+/g, ' ').slice(0, 700) };
+}"""
 
 # ---------- API 目标循环 ----------
 
@@ -137,7 +126,7 @@ def run_ai_api_case(case, env, run_id: str, on_step=None) -> dict:
     variables = _case_vars(case, env)
     goal = substitute(cfg.get("goal", ""), variables)
     base = (env.base_url or "").rstrip("/") if env else ""
-    max_steps = int(cfg.get("max_steps") or 12)
+    max_steps = int(cfg.get("max_steps") or 200)
 
     def _emit():
         if on_step:
@@ -160,12 +149,13 @@ def run_ai_api_case(case, env, run_id: str, on_step=None) -> dict:
     last_fail_key, same_fail = None, 0
 
     if not A.llm_available():
+        pass
         return _fail("AI 测试需要配置大模型：请在「模型配置」页添加并启用，或在 .env 配置 TD_LLM_BASE_URL / TD_LLM_KEY",
                      "未配置 LLM")
     if not base:
         return _fail("AI-API 用例需要环境配置 Base URL（接口域名）", "缺少 Base URL")
 
-    with httpx.Client(base_url=base, timeout=20, trust_env=False) as client:
+    with A.run_context(run_id), httpx.Client(base_url=base, timeout=20, trust_env=False) as client:
         endpoints = (cfg.get("endpoints") or [])[:30]
         for i in range(1, max_steps + 1):
             if _q.is_cancelled(run_id):
@@ -297,6 +287,23 @@ def _replay_api(fixed: list, env, on_step=None) -> dict:
             "duration": round(time.time() - t0, 2), "detail": detail, "saved": saved,
             "summary": f"固定请求回放 · {'通过' if not fail_n else '未通过'}"}
 
+def _loc_visible_first(page, sel: str):
+    """选择器命中多个元素时优先可见的那个（下拉选项常与已选值/隐藏节点同文案，
+    按 DOM 序点第一个会落在隐藏元素上等到超时）。
+    宿主对象不支持 locator（测试桩）时返回 None，调用方走 page.click/fill 旧路径。"""
+    try:
+        loc = page.locator(sel)
+        n = loc.count()
+        if n > 1:
+            for i in range(n):
+                cand = loc.nth(i)
+                if cand.is_visible():
+                    return cand
+        return loc.first
+    except Exception:
+        return None
+
+
 def _exec_action(page, act: dict, variables: dict):
     """在页面上执行一个模型动作。返回 (ok, reason, saved|None)。"""
     op = act.get("action", "")
@@ -304,10 +311,16 @@ def _exec_action(page, act: dict, variables: dict):
     val = substitute(str(act.get("value", "")), variables)
     url = substitute(act.get("url", ""), variables)
     if op == "goto":
-        page.goto(url, timeout=20000)
-        return True, f"打开 {url}", None
+        # 模型常给相对路径（如 "/"）：按当前页解析成绝对地址，否则 Playwright 直接报 invalid URL
+        target = url if "://" in url else urljoin(getattr(page, "url", "") or "http://localhost/", url)
+        page.goto(target, timeout=20000)
+        return True, f"打开 {target}", None
     if op == "click":
-        page.click(sel, timeout=8000)
+        loc = _loc_visible_first(page, sel)
+        if loc is None:
+            page.click(sel, timeout=8000)
+        else:
+            loc.click(timeout=8000)
         return True, f"点击 {sel}", None
     if op == "click_xy":  # 点选验证码：按截图坐标点击
         x, y = int(act.get("x", 0)), int(act.get("y", 0))
@@ -326,7 +339,11 @@ def _exec_action(page, act: dict, variables: dict):
         page.mouse.up()
         return True, f"拖拽 ({x1},{y1})→({x2},{y2})", None
     if op == "fill":
-        page.fill(sel, val, timeout=8000)
+        loc = _loc_visible_first(page, sel)
+        if loc is None:
+            page.fill(sel, val, timeout=8000)
+        else:
+            loc.fill(val, timeout=8000)
         return True, f"在 {sel} 输入 {val}", None
     if op == "expect_text":
         body = page.inner_text("body", timeout=8000)
@@ -370,9 +387,10 @@ def ai_drive(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEP
     按钮缺失就在该步明细记 warning——不判失败、不计入 pass_n/fail_n、不回写地图。
     """
     from .brain_agentscope import run_brain   # 惰性导入：模块反向依赖 ai_runner 的动作层
-    r = run_brain(page, goal, variables, max_steps=max_steps, run_id=run_id,
-                  shot_tag=shot_tag, on_step=on_step, engine=engine,
-                  page_map=page_map, project_id=project_id)
+    with A.run_context(run_id):   # 本执行的 LLM 调用都归属到 llm_logs.run_id
+        r = run_brain(page, goal, variables, max_steps=max_steps, run_id=run_id,
+                      shot_tag=shot_tag, on_step=on_step, engine=engine,
+                      page_map=page_map, project_id=project_id)
     r.pop("brain", None)     # 内部标注不进执行明细契约
     r.pop("usage", None)     # 用量已经 on_usage 实时写入 llm_logs
     return r

@@ -143,7 +143,7 @@ const recInitialUrl = computed(() => {
             <option value="api">API 测试（接口调用）</option>
           </select></div>
         <div class="fld"><label>最大步数（防止失控）</label>
-          <input v-model.number="c.max_steps" type="number" min="3" max="99" placeholder="30"></div>
+          <input v-model.number="c.max_steps" type="number" min="3" max="9999" placeholder="200"></div>
       </div>
 
       <div class="fld"><label>测试目标（用大白话描述要做的事和预期结果，可引用 ${'{'}变量{'}'} 如账号密码）</label>

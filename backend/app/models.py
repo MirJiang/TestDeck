@@ -80,6 +80,7 @@ class AppPage(Base):
     depth = Column(Integer, default=0)         # 距起始页的跳数
     source = Column(String(16), default="scan")  # scan=爬取 | code=源码分析 | manual=手动/upsert
     roles = Column(String(255), default="")      # 见到该页的角色（逗号分隔），多角色扫描合并产出
+    entry = Column(String(255), default="")      # 扫描时从哪个菜单/链接点击进入（页面结构树用）
     scanned_at = Column(DateTime, default=now)
 
 
@@ -100,6 +101,15 @@ class AppElement(Base):
     source = Column(String(16), default="scan")   # scan | code | manual
     state_note = Column(String(255), default="")  # 出现条件备注（非空 = 条件性元素，比对跳过）
     roles = Column(String(255), default="")       # 见到该元素的角色（逗号分隔）
+
+
+class AppMenu(Base):
+    """应用地图·导航菜单结构：扫描探索时记录的菜单父子关系（点击后无跳转但冒出子项 = 父子边）。"""
+    __tablename__ = "app_menus"
+    id = Column(String(64), primary_key=True, default=uid)
+    project_id = Column(String(64), nullable=False, index=True)
+    parent = Column(String(255), default="")     # 父级菜单文本（点击的元素）
+    text = Column(String(255), default="")       # 冒出的子项文本
 
 
 class TestPlan(Base):
@@ -210,6 +220,7 @@ class LLMLog(Base):
     __tablename__ = "llm_logs"
     id = Column(String(64), primary_key=True, default=uid)
     kind = Column(String(32), default="")                  # gen-commits | gen-text | analyze | agent-step
+    run_id = Column(String(64), default="")                # 归属的执行记录（按次统计；流程步骤沿用 run_id）
     model = Column(String(128), default="")
     prompt_tokens = Column(Integer, default=0)
     completion_tokens = Column(Integer, default=0)

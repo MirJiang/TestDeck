@@ -50,6 +50,8 @@ tbody tr:hover td{background:#f7f8fa}
 .nav .it:hover{background:rgba(255,255,255,.06);color:#fff}
 .nav .it.on{background:rgba(91,141,239,.16);color:#fff}
 .nav .it .n{float:right;font-family:var(--mono);font-size:13px;color:#5c6470;line-height:22px}
+.nav .it .n.runn{color:var(--acc);animation:runpulse 1.6s ease-in-out infinite}
+@keyframes runpulse{50%{opacity:.45}}
 .main{flex:1;min-width:0}
 .top{height:46px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 22px;position:sticky;top:0;z-index:20}
 .top .path{font-size:13.5px;color:var(--sub)}

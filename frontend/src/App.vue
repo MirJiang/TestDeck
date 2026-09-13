@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { api, getUser, clearAuth } from './api'
 import { toast } from './dialog'
@@ -8,6 +8,18 @@ import DialogHost from './components/DialogHost.vue'
 const router = useRouter()
 const route = useRoute()
 const user = getUser()
+
+// 执行中数量角标：任何页面都能一眼看到有没有测试在跑
+const execN = ref(0)
+let execPoll = null
+if (user) {
+  const pollExec = async () => {
+    try { execN.value = (await api('/runs?status=running&size=1')).total || 0 } catch { /* 离线忽略 */ }
+  }
+  pollExec()
+  execPoll = setInterval(pollExec, 5000)
+}
+onUnmounted(() => { if (execPoll) clearInterval(execPoll) })
 
 const nav = [
   { cap: '概览' },
@@ -52,7 +64,8 @@ async function changePw() {
       <nav class="nav">
         <template v-for="item in nav" :key="item.label || item.cap">
           <div v-if="item.cap" class="cap">{{ item.cap }}</div>
-          <router-link v-else class="it" :to="item.path" :class="{ on: route.path === item.path }">{{ item.label }}</router-link>
+          <router-link v-else class="it" :to="item.path" :class="{ on: route.path === item.path }">{{ item.label }}<span
+            v-if="item.path === '/runs' && execN" class="n runn">{{ execN }}</span></router-link>
         </template>
       </nav>
     </aside>

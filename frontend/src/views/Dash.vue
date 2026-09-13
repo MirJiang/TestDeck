@@ -52,15 +52,16 @@ function pct(r) { const t = r.pass_n + r.fail_n; return t ? Math.round(r.pass_n 
   <div class="panel">
     <div class="bar"><h3>最近执行</h3><router-link to="/runs">全部记录 →</router-link></div>
     <table>
-      <thead><tr><th>执行 ID</th><th>来源</th><th>环境</th><th>结果</th><th>耗时</th><th>触发</th><th>时间</th><th></th></tr></thead>
+      <thead><tr><th>执行 ID</th><th>来源</th><th>结果</th><th>耗时</th><th>Token</th><th>触发</th><th>时间</th><th></th></tr></thead>
       <tbody>
         <tr v-for="r in recent" :key="r.id">
           <td class="mono">{{ r.id }}</td>
           <td>{{ r.plan_name ? '计划 · ' + r.plan_name : '用例 · ' + r.case_name }}</td>
-          <td>{{ r.env_name }}</td>
-          <td><span class="pass"><span class="track"><i :class="{ bad: r.fail_n }" :style="{ width: pct(r) + '%' }"></i></span>
-              <span class="pct">{{ r.pass_n }}/{{ r.pass_n + r.fail_n }}</span></span></td>
+          <td><span class="st" :class="r.status === 'passed' ? 'ok' : (r.status === 'running' ? 'run' : 'err')">{{ r.status === 'passed' ? '成功' : (r.status === 'running' ? '执行中' : '失败') }}</span>
+            <span class="pass"><span class="track"><i :class="{ bad: r.fail_n }" :style="{ width: pct(r) + '%' }"></i></span>
+            <span class="pct">{{ r.pass_n }}/{{ r.pass_n + r.fail_n }} · {{ pct(r) }}%</span></span></td>
           <td class="mono">{{ r.duration }}s</td>
+          <td class="mono muted">{{ (r.tokens || 0).toLocaleString() }}</td>
           <td class="muted">{{ r.trigger_by }}</td>
           <td class="mono muted">{{ r.created_at.replace('T', ' ').slice(0, 16) }}</td>
           <td><a @click="report = r">报告</a></td>

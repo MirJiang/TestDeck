@@ -38,6 +38,18 @@ def _setup(client, H):
     return pid, eid, cid, fid
 
 
+def _wait_run(client, H, rid, timeout=20):
+    """触发接口立即返回 running，轮询直到结束。"""
+    import time
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        d = client.get(f"/api/v1/runs/{rid}", headers=H).json()
+        if d.get("status") and d["status"] != "running":
+            return d
+        time.sleep(0.2)
+    raise AssertionError("执行轮询超时")
+
+
 def test_plan_runs_cases_and_flows():
     client = make_client()
     H = {"Authorization": "Bearer " + login(client, "admin", "admin123")}
@@ -50,6 +62,7 @@ def test_plan_runs_cases_and_flows():
     assert pl["flow_ids"] == [fid], "计划列表应返回 flow_ids"
 
     run = client.post(f"/api/v1/runs/plans/{plan['id']}/run", json={"env_id": eid}, headers=H).json()
+    run = _wait_run(client, H, run["id"])
     assert run["plan_name"] == "回归"
     assert run["fail_n"] == 2, "用例 1 个检查点 + 流程 1 个步骤都失败"
     kinds = {("case" if "case_id" in i else "flow"): i for i in run["detail"]}

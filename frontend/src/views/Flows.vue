@@ -54,7 +54,7 @@ function addStep(type) {
   const role = editing.value.roles[0]?.key || ''
   const tpl = {
     ui: { role, type: 'ui', action: 'goto', url: '', selector: '', value: '' },
-    ai: { role, type: 'ai', goal: '', url: '', max_steps: 15, retries: 1 },
+    ai: { role, type: 'ai', goal: '', url: '', max_steps: 200, retries: 1 },
     case: { role, type: 'case', case_id: '' },
     api: { role, type: 'api', m: 'POST', url: '', headers: '', body: '',
            check: { type: 'status', expect: '200', field: '' }, save: { name: '', from: '' } },
@@ -65,7 +65,7 @@ function addStep(type) {
 function onStepType(s) {
   const fresh = { role: s.role, type: s.type }
   if (s.type === 'ui') Object.assign(fresh, { action: 'goto', url: '', selector: '', value: '' })
-  else if (s.type === 'ai') Object.assign(fresh, { goal: '', url: '', max_steps: 15 })
+  else if (s.type === 'ai') Object.assign(fresh, { goal: '', url: '', max_steps: 200 })
   else if (s.type === 'case') Object.assign(fresh, { case_id: '' })
   else Object.assign(fresh, { m: 'POST', url: '', headers: '', body: '',
     check: { type: 'status', expect: '200', field: '' }, save: { name: '', from: '' } })
@@ -324,7 +324,7 @@ function stepsFor(result) {
               <div class="fld"><label>起始页面（可选，只填路径）</label>
                 <input v-model="s.url" class="mono" placeholder="/page/login"></div>
               <div class="fld"><label>最大步数</label>
-                <input v-model.number="s.max_steps" type="number" min="3" max="40" placeholder="15"></div>
+                <input v-model.number="s.max_steps" type="number" min="3" max="9999" placeholder="200"></div>
             </div>
           </template>
 
@@ -438,16 +438,16 @@ function stepsFor(result) {
     <div class="dh"><h3>执行记录 · {{ history.name }}</h3><button class="x" @click="history = null">✕</button></div>
     <div class="db">
       <table>
-        <thead><tr><th>执行 ID</th><th>环境</th><th>结果</th><th>耗时</th><th>时间</th><th></th></tr></thead>
+        <thead><tr><th>执行 ID</th><th>结果</th><th>耗时</th><th>时间</th><th></th></tr></thead>
         <tbody>
           <tr v-for="r in historyRows" :key="r.id">
-            <td class="mono">{{ r.id }}</td><td>{{ r.env_name }}</td>
+            <td class="mono">{{ r.id }}</td>
             <td><span :class="r.status === 'passed' ? 'st ok' : 'st err'">{{ r.status === 'passed' ? '跑通' : '中断' }}</span></td>
             <td class="mono">{{ r.duration }}s</td>
             <td class="mono muted">{{ r.created_at.replace('T',' ').slice(0,16) }}</td>
             <td><a @click="viewDetail(r)">详情</a></td>
           </tr>
-          <tr v-if="!historyRows.length"><td colspan="6" class="empty">暂无记录</td></tr>
+          <tr v-if="!historyRows.length"><td colspan="5" class="empty">暂无记录</td></tr>
         </tbody>
       </table>
     </div>

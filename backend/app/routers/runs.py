@@ -1,3 +1,5 @@
+import asyncio
+from datetime import datetime, timedelta
 import time
 import csv
 import io
@@ -12,7 +14,7 @@ from ..perms import check_project_access
 from ..engine.runner import run_case
 from ..engine.ui_runner import run_ui_case
 from ..engine.ai_runner import run_ai_case
-from ..engine.queue import queued, register, cancel, unregister, is_cancelled
+from ..engine.queue import queued, submit, register, cancel, unregister, is_cancelled
 from ..notify import notify_run
 
 router = APIRouter(prefix="/api/v1/runs", tags=["runs"])
@@ -38,34 +40,64 @@ def _push_run_detail(run_id: str, detail: list):
         db.close()
 
 
-async def _exec_case_sync(c: TestCase, env: Env, trigger_by: str) -> TestRun:
-    """完整执行一个用例（建记录 → 队列执行 → 回写 → 通知）。REST 与 MCP 共用。"""
+_bg_futs: set = set()   # 持有后台执行 future，防 GC 回收
+
+
+def _create_case_run(c: TestCase, env: Env, trigger_by: str) -> TestRun:
+    """预建 running 状态的执行记录（触发接口立即返回 id，前端据此轮询进度）。"""
     run = TestRun(id=_new_run_id(), case_id=c.id, case_name=c.name,
                   env_id=env.id, env_name=env.name, trigger_by=trigger_by)
     db = SessionLocal()
     try:
         db.add(run)
         db.commit()
+    finally:
+        db.close()
+    return run
 
-        def _exec():
-            if c.type == "ui":
-                return run_ui_case(c, env, run.id)
-            if c.type == "ai":
-                return run_ai_case(c, env, run.id, on_step=lambda d: _push_run_detail(run.id, d))
-            return run_case(c, env)
 
+def _case_bg(c: TestCase, env: Env, run: TestRun, loop):
+    """队列线程任务：执行用例 → 回写执行记录 → 失败告警。异常兜底成失败记录。"""
+    import asyncio
+
+    def _job():
         register(run.id)
         try:
-            r = await queued(_exec)
+            if c.type == "ui":
+                r = run_ui_case(c, env, run.id)
+            elif c.type == "ai":
+                r = run_ai_case(c, env, run.id, on_step=lambda d: _push_run_detail(run.id, d))
+            else:
+                r = run_case(c, env)
+        except Exception as e:
+            r = {"status": "failed", "pass_n": 0, "fail_n": 1, "duration": 0.0,
+                 "detail": [{"idx": 1, "action": "error", "target": "", "pass": False,
+                             "reason": f"{type(e).__name__}: {e}"[:200], "ms": 0}]}
         finally:
             unregister(run.id)
         run.status, run.pass_n, run.fail_n = r["status"], r["pass_n"], r["fail_n"]
         run.duration, run.detail = r["duration"], r["detail"]
-        db.commit()
-        await notify_run(run)
-        return run
-    finally:
-        db.close()
+        db = SessionLocal()
+        try:
+            db_run = db.get(TestRun, run.id)
+            if db_run:
+                db_run.status, db_run.pass_n, db_run.fail_n = run.status, run.pass_n, run.fail_n
+                db_run.duration, db_run.detail = run.duration, run.detail
+                db.commit()
+        finally:
+            db.close()
+        try:
+            asyncio.run_coroutine_threadsafe(notify_run(run), loop).result(timeout=30)
+        except Exception:
+            pass
+    return _job
+
+
+async def _exec_case_sync(c: TestCase, env: Env, trigger_by: str) -> TestRun:
+    """完整执行一个用例并等待结果（MCP 等同步调用方使用）。"""
+    run = _create_case_run(c, env, trigger_by)
+    await queued(_case_bg(c, env, run, asyncio.get_running_loop()))
+    return run
 
 
 async def _exec_flow_sync(f: Flow, env: Env | None, trigger_by: str) -> TestRun:
@@ -97,7 +129,7 @@ async def _exec_flow_sync(f: Flow, env: Env | None, trigger_by: str) -> TestRun:
         db.close()
 
 
-def execute_plan(plan: TestPlan, env: Env, trigger_by: str = "cron") -> TestRun:
+def execute_plan(plan: TestPlan, env: Env, trigger_by: str = "cron", run_id: str = "") -> TestRun:
     """同步执行整个计划：先逐条用例、再逐条流程（条目失败不中断批次），写一条 TestRun。
 
     每条流程另写一条独立执行记录（只带 flow_id，不带 plan_id，
@@ -106,9 +138,15 @@ def execute_plan(plan: TestPlan, env: Env, trigger_by: str = "cron") -> TestRun:
     from ..engine.flow_runner import run_flow
     db = SessionLocal()
     try:
-        run = TestRun(id=_new_run_id(), plan_id=plan.id, plan_name=plan.name,
-                      env_id=env.id, env_name=env.name, trigger_by=trigger_by)
-        db.add(run); db.commit()
+        run = db.get(TestRun, run_id) if run_id else None
+        if run is None:   # 常规路径（cron/预置 id 不存在）：新建
+            run = TestRun(id=run_id or _new_run_id(), plan_id=plan.id, plan_name=plan.name,
+                          env_id=env.id, env_name=env.name, trigger_by=trigger_by)
+            db.add(run)
+        else:             # 触发接口已预插 running 记录：就地复用
+            run.plan_id, run.plan_name = plan.id, plan.name
+            run.env_id, run.env_name, run.trigger_by = env.id, env.name, trigger_by
+        db.commit()
         total_p = total_f = 0
         t0 = time.time()
         results = []
@@ -171,7 +209,10 @@ async def run_single(cid: str, body: RunIn, db: Session = Depends(get_db), user:
     env = db.get(Env, body.env_id)
     if not env:
         raise HTTPException(400, "环境不存在")
-    run = await _exec_case_sync(c, env, f"user:{user.username}")
+    run = _create_case_run(c, env, f"user:{user.username}")
+    fut = submit(_case_bg(c, env, run, asyncio.get_running_loop()))
+    _bg_futs.add(fut)
+    fut.add_done_callback(_bg_futs.discard)
     return _run_out(run)
 
 
@@ -184,9 +225,27 @@ async def run_plan(pid: str, body: RunIn, db: Session = Depends(get_db), user: U
     env = db.get(Env, body.env_id or plan.env_id)
     if not env:
         raise HTTPException(400, "环境不存在")
-    result = await queued(lambda: execute_plan(plan, env, trigger_by=f"user:{user.username}"))
-    await notify_run(result)
-    return _run_out(result)
+    loop = asyncio.get_running_loop()
+    run_id = _new_run_id()
+    trigger = f"user:{user.username}"
+    stub = TestRun(id=run_id, plan_id=plan.id, plan_name=plan.name,
+                   env_id=env.id, env_name=env.name, trigger_by=trigger,
+                   status="running", pass_n=0, fail_n=0, duration=0.0,
+                   detail=[], created_at=datetime.utcnow())
+    db.add(stub); db.commit()   # 预插 running 记录，轮询不会 404
+
+    def _bg():
+        r = execute_plan(plan, env, trigger_by=trigger, run_id=run_id)
+        try:
+            asyncio.run_coroutine_threadsafe(notify_run(r), loop).result(timeout=30)
+        except Exception:
+            pass
+        return r
+
+    fut = submit(_bg)
+    _bg_futs.add(fut)
+    fut.add_done_callback(_bg_futs.discard)
+    return _run_out(stub)
 
 
 @router.post("/{rid}/cancel")
@@ -224,7 +283,9 @@ def export_runs_csv(db: Session = Depends(get_db), user: User = Depends(current_
 
 
 @router.get("")
-def list_runs(plan: str = "", case: str = "", flow: str = "", page: int = 1, size: int = 20,
+def list_runs(plan: str = "", case: str = "", case_kw: str = "", flow: str = "",
+              status: str = "", project: str = "", start: str = "", end: str = "",
+              page: int = 1, size: int = 20,
               db: Session = Depends(get_db), user: User = Depends(current_user)):
     q = db.query(TestRun).order_by(TestRun.created_at.desc(), TestRun.id.desc())
     if plan:
@@ -233,6 +294,31 @@ def list_runs(plan: str = "", case: str = "", flow: str = "", page: int = 1, siz
         q = q.filter(TestRun.case_id == case)
     if flow:
         q = q.filter(TestRun.flow_id == flow)
+    if project:
+        # 项目过滤：执行记录无 project_id，经用例/流程/计划三方关联取并集
+        cids = {c.id for c in db.query(TestCase.id).filter(TestCase.project_id == project)}
+        fids = {f.id for f in db.query(Flow.id).filter(Flow.project_id == project)}
+        pids = {p.id for p in db.query(TestPlan.id).filter(TestPlan.project_id == project)}
+        q = q.filter((TestRun.case_id.in_(cids)) | (TestRun.flow_id.in_(fids))
+                     | (TestRun.plan_id.in_(pids)))
+    if status:
+        q = q.filter(TestRun.status == status)
+    if case:
+        q = q.filter(TestRun.case_id == case)
+    elif case_kw:
+        kw = case_kw.replace("%", "").replace("_", "").strip()
+        if kw:
+            q = q.filter(TestRun.case_name.like(f"%{kw}%"))
+    if start:
+        try:
+            q = q.filter(TestRun.created_at >= datetime.strptime(start, "%Y-%m-%d"))
+        except ValueError:
+            pass
+    if end:
+        try:
+            q = q.filter(TestRun.created_at < datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1))
+        except ValueError:
+            pass
     if user.role != "admin":  # member 只见自己项目的执行记录
         from ..perms import accessible_project_ids
         ids = set(accessible_project_ids(user, db))
@@ -243,7 +329,17 @@ def list_runs(plan: str = "", case: str = "", flow: str = "", page: int = 1, siz
                       | TestRun.flow_id.in_(allowed_flow)))
     total = q.count()
     rows = q.offset((page - 1) * size).limit(size).all()
-    return {"total": total, "items": [_run_out(r, brief=True) for r in rows]}
+    tokens = {}
+    if rows:
+        from sqlalchemy import func
+        from ..models import LLMLog
+        ids = [r.id for r in rows]
+        g = (db.query(LLMLog.run_id,
+                      func.sum(func.coalesce(LLMLog.prompt_tokens, 0)
+                               + func.coalesce(LLMLog.completion_tokens, 0)))
+             .filter(LLMLog.run_id.in_(ids)).group_by(LLMLog.run_id).all())
+        tokens = {rid: int(t or 0) for rid, t in g}
+    return {"total": total, "items": [_run_out(r, brief=True, tokens=tokens.get(r.id, 0)) for r in rows]}
 
 
 @router.get("/{rid}/export")
@@ -286,7 +382,7 @@ def get_run(rid: str, db: Session = Depends(get_db), user: User = Depends(curren
     if not r:
         raise HTTPException(404, "执行记录不存在")
     _authorize_run(r, user, db)
-    return _run_out(r)
+    return _run_out(r, tokens=_run_tokens(rid, db))
 
 
 def _authorize_run(r: TestRun, user, db) -> None:
@@ -307,12 +403,25 @@ def _authorize_run(r: TestRun, user, db) -> None:
         raise HTTPException(403, "无权访问该执行记录")
 
 
-def _run_out(r: TestRun, brief: bool = False) -> dict:
+def _run_tokens(rid: str, db) -> int:
+    """单次执行的 LLM token 总消耗（llm_logs 按 run_id 归属，prompt+completion）。"""
+    from sqlalchemy import func
+    from ..models import LLMLog
+    total = db.query(func.sum(
+        func.coalesce(LLMLog.prompt_tokens, 0) + func.coalesce(LLMLog.completion_tokens, 0))
+    ).filter(LLMLog.run_id == rid).scalar()
+    return int(total or 0)
+
+
+def _run_out(r: TestRun, brief: bool = False, tokens: int | None = None) -> dict:
     out = {"id": r.id, "plan_id": r.plan_id, "plan_name": r.plan_name, "case_id": r.case_id,
            "case_name": r.case_name, "flow_id": r.flow_id, "flow_name": r.flow_name,
            "env_name": r.env_name, "status": r.status,
            "pass_n": r.pass_n, "fail_n": r.fail_n, "duration": r.duration,
-           "trigger_by": r.trigger_by, "created_at": r.created_at.isoformat()}
+           "trigger_by": r.trigger_by,
+           "created_at": r.created_at.isoformat() if r.created_at else ""}
+    if tokens is not None:
+        out["tokens"] = tokens
     if not brief:
         out["detail"] = r.detail
     return out

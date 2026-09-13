@@ -17,6 +17,7 @@ async def lifespan(app: FastAPI):
     _migrate()
     _encrypt_credentials()
     _alembic_upgrade()
+    _fail_stale_running()
     _seed()
     scheduler.start()
     from .maintenance import register_daily, cleanup_screenshots
@@ -55,6 +56,8 @@ def _migrate():
         ("app_elements", "source", "VARCHAR(16) DEFAULT 'scan'"),
         ("app_elements", "state_note", "VARCHAR(255) DEFAULT ''"),
         ("app_elements", "roles", "VARCHAR(255) DEFAULT ''"),
+        ("llm_logs", "run_id", "VARCHAR(64) DEFAULT ''"),
+        ("app_pages", "entry", "VARCHAR(255) DEFAULT ''"),
     ]:
         if table in insp.get_table_names():
             cols = {c["name"] for c in insp.get_columns(table)}
@@ -62,6 +65,20 @@ def _migrate():
                 with engine.begin() as conn:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
     _migrate_flow_runs()
+
+
+def _fail_stale_running():
+    """启动清扫：进程退出时仍在 running 的执行已随进程死亡，标记为失败（已完成的步骤保留在明细里）。"""
+    from sqlalchemy import inspect, text
+    if "test_runs" not in inspect(engine).get_table_names():
+        return
+    with engine.begin() as conn:
+        n = conn.execute(
+            text("SELECT count(*) FROM test_runs WHERE status='running'")).scalar()
+        if n:
+            conn.execute(text(
+                "UPDATE test_runs SET status='failed', fail_n = fail_n + 1 WHERE status='running'"))
+            print(f"[TestDeck] 已将 {n} 条上次进程中断的执行记录标记为失败")
 
 
 def _encrypt_credentials():

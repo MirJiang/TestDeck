@@ -48,11 +48,11 @@ def test_upsert_rest_and_get(client, token):
     assert r.json() == {"pages": 1, "elements": 3, "created": 1, "updated": 0, "source": "code"}
 
     m = client.get(f"/api/v1/projects/{pid}/app-map", headers=H(token)).json()
-    assert len(m) == 1 and m[0]["source"] == "code" and m[0]["path"] == "/orders"
-    btns = {b["text"]: b for b in m[0]["buttons"]}
+    assert len(m["pages"]) == 1 and m["pages"][0]["source"] == "code" and m["pages"][0]["path"] == "/orders"
+    btns = {b["text"]: b for b in m["pages"][0]["buttons"]}
     assert btns["新建订单"]["source"] == "code"
     assert btns["审批"]["state_note"] == "仅审批岗可见"
-    assert m[0]["links"][0]["href"] == "/orders/detail"
+    assert m["pages"][0]["links"][0]["href"] == "/orders/detail"
 
 
 def test_upsert_rejects_empty_and_bad_source(client, token):
@@ -75,7 +75,7 @@ def test_upsert_merge_semantics(client, token):
         {"kind": "button", "text": "提交", "selector": "#new"},          # 同键：更新 selector
         {"kind": "button", "text": "取消"}]}], "manual")                  # 新元素：manual
     assert out == {"pages": 1, "elements": 2, "created": 0, "updated": 1, "source": "manual"}
-    m = client.get(f"/api/v1/projects/{pid}/app-map", headers=H(token)).json()[0]
+    m = client.get(f"/api/v1/projects/{pid}/app-map", headers=H(token)).json()["pages"][0]
     assert m["title"] == "新标题" and m["source"] == "code"    # code > manual，页面来源不被弱化
     btns = {b["text"]: b for b in m["buttons"]}
     assert btns["提交"]["selector"] == "#new"
@@ -88,7 +88,7 @@ def test_upsert_merge_semantics(client, token):
 
 def _fake_crawl_factory(per_role):
     def fake_crawl(base, start, origin, role, username, password, max_pages, max_depth):
-        return per_role[role], ""
+        return per_role[role], "", []
     return fake_crawl
 
 
@@ -121,7 +121,7 @@ def test_scan_multi_role_merge(monkeypatch, client, token):
                  max_pages=10)
     assert r["pages"] == 3 and r["roles"] == ["货主", "审批员"]
 
-    m = {pg["path"]: pg for pg in client.get(f"/api/v1/projects/{pid}/app-map", headers=H(token)).json()}
+    m = {pg["path"]: pg for pg in client.get(f"/api/v1/projects/{pid}/app-map", headers=H(token)).json()["pages"]}
     assert set(m) == {"/home", "/orders", "/audit", "/from-code"}   # code 保留、/gone 删除
     home = m["/home"]
     assert set(home["roles"].split(",")) == {"货主", "审批员"}
@@ -138,7 +138,7 @@ def test_scan_login_failure_note(monkeypatch, client, token):
 
     def fake_crawl(base, start, origin, role, username, password, max_pages, max_depth):
         return {"/home": {"title": "首页", "depth": 0, "links": [], "btns": []}}, \
-            f"{role}登录未完成(验证码失败)"
+            f"{role}登录未完成(验证码失败)", []
     monkeypatch.setattr(app_mapper, "_crawl", fake_crawl)
     r = scan_app("http://x", pid, "", [{"name": "货主", "username": "a", "password": "p"}])
     assert "货主登录未完成" in r["note"] and "部分角色可见" in r["note"]

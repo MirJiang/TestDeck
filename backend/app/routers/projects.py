@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..db import get_db
-from ..models import (User, Project, Env, ProjectMember, ProjectUser, AppPage, AppElement,
+from ..models import (User, Project, Env, ProjectMember, ProjectUser, AppPage, AppElement, AppMenu,
                       TestCase, TestPlan, Schedule, TestRun, Flow, GitRepo, CommitSync,
                       ApiDoc, ApiEndpoint)
 from ..auth import current_user
@@ -357,12 +357,14 @@ def upsert_app_map(pid: str, body: UpsertIn, db: Session = Depends(get_db), user
 def get_app_map(pid: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     """应用地图：页面清单（含按钮与链接关系、来源与角色标注）。"""
     check_project_access(pid, user, db)
+    menus = [{"parent": m.parent, "text": m.text}
+             for m in db.query(AppMenu).filter(AppMenu.project_id == pid).all()]
     pages = db.query(AppPage).filter(AppPage.project_id == pid).order_by(AppPage.depth, AppPage.path).all()
     out = []
     for pg in pages:
         els = db.query(AppElement).filter(AppElement.page_id == pg.id).all()
         out.append({"id": pg.id, "path": pg.path, "title": pg.title, "depth": pg.depth,
-                    "source": pg.source or "scan", "roles": pg.roles or "",
+                    "source": pg.source or "scan", "roles": pg.roles or "", "entry": pg.entry or "",
                     "scanned_at": pg.scanned_at.isoformat() if pg.scanned_at else "",
                     "buttons": [{"text": e.text, "selector": e.selector, "disabled": e.disabled,
                                  "source": e.source or "scan", "state_note": e.state_note or "",
@@ -372,7 +374,7 @@ def get_app_map(pid: str, db: Session = Depends(get_db), user: User = Depends(cu
                                "source": e.source or "scan", "state_note": e.state_note or "",
                                "roles": e.roles or ""}
                               for e in els if e.kind == "link"]})
-    return out
+    return {"pages": out, "menus": menus}
 
 
 @router.delete("/{pid}/app-map")
@@ -381,5 +383,6 @@ def clear_app_map(pid: str, db: Session = Depends(get_db), user: User = Depends(
     for old in db.query(AppPage).filter(AppPage.project_id == pid):
         db.query(AppElement).filter(AppElement.page_id == old.id).delete()
     db.query(AppPage).filter(AppPage.project_id == pid).delete()
+    db.query(AppMenu).filter(AppMenu.project_id == pid).delete()
     db.commit()
     return {"ok": True}

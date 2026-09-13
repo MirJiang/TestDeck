@@ -47,3 +47,12 @@ async def queued(sync_fn):
     """sync_fn: 无参可调用的同步函数。在专用线程串行执行并等待结果。"""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_pool, sync_fn)
+
+
+def submit(sync_fn):
+    """把同步任务提交到执行队列，立即返回 future（不等待结果）。
+
+    与 queued 共用线程池和并发上限；适合"前端触发后轮询进度"的触发场景，
+    任务内部需自行回写执行记录。调用方须持有返回的 future 防止被 GC。"""
+    loop = asyncio.get_running_loop()
+    return loop.run_in_executor(_pool, sync_fn)

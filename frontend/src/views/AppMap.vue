@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { api } from '../api'
 import { confirmDialog, toast } from '../dialog'
 
@@ -16,7 +16,7 @@ const note = ref('')
 const SOURCE_LABEL = { scan: '扫描', code: '源码', manual: '人工' }
 
 watch(pid, async v => {
-  users.value = []; mapList.value = []; note.value = ''
+  users.value = []; mapList.value = []; note.value = ''; selId.value = ''
   form.value = { userIds: [], maxPages: 25 }
   if (v) {
     users.value = await api(`/projects/${v}/users`).catch(() => [])
@@ -24,7 +24,10 @@ watch(pid, async v => {
   }
 })
 
-async function load() { mapList.value = await api(`/projects/${pid.value}/app-map`) }
+async function load() {
+  const r = await api(`/projects/${pid.value}/app-map`)
+  mapList.value = r.pages; mapMenus.value = r.menus || []
+}
 
 async function doScan() {
   busy.value = true
@@ -45,7 +48,7 @@ async function doScan() {
 async function clearMap() {
   if (!await confirmDialog('清除该项目的应用地图？AI 执行将不再注入页面先验知识，重新扫描可恢复。', { danger: true, okText: '清除' })) return
   await api(`/projects/${pid.value}/app-map`, { method: 'DELETE' })
-  mapList.value = []
+  mapList.value = []; selId.value = ''
 }
 
 // ---- 导入 / 人工维护（upsert 合并写入，不删已有数据） ----
@@ -91,9 +94,77 @@ async function doImportMap() {
   } catch (e) { impErr.value = '导入失败：' + e.message } finally { impBusy.value = false }
 }
 
+// ---- 双栏浏览：左页面清单（可搜索），右页面详情（按钮/跳转表格） ----
+const kw = ref('')
+const selId = ref('')
+const mapMenus = ref([])
+
+const filtered = computed(() => {
+  const k = kw.value.trim().toLowerCase()
+  if (!k) return mapList.value
+  return mapList.value.filter(pg =>
+    pg.path.toLowerCase().includes(k) || (pg.title || '').toLowerCase().includes(k) ||
+    (pg.entry || '').toLowerCase().includes(k) ||
+    pg.buttons.some(b => (b.text || '').toLowerCase().includes(k)))
+})
+const selPage = computed(() =>
+  mapList.value.find(p => p.id === selId.value) || filtered.value[0] || null)
+
+// 浏览模式（无搜索词）：按扫描到的导航菜单层级展示（菜单父子边 + 页面按入口挂载）；
+// 搜索模式：平铺过滤结果
+const menuRows = computed(() => {
+  if (kw.value.trim()) return null
+  const nodes = new Map()
+  for (const m of mapMenus.value) {
+    for (const t of [m.parent, m.text])
+      if (!nodes.has(t)) nodes.set(t, { text: t, children: [], pages: [] })
+  }
+  for (const m of mapMenus.value) {
+    const p = nodes.get(m.parent)
+    if (!p.children.some(c => c.text === m.text)) p.children.push(nodes.get(m.text))
+  }
+  const isChild = new Set(mapMenus.value.map(m => m.text))
+  const tops = [...nodes.values()].filter(n => !isChild.has(n.text))
+  const out = []
+  // 页面按入口挂到菜单项下（entry = 扫描时点击进入该页的菜单文本）
+  for (const pg of filtered.value) {
+    const n = nodes.get((pg.entry || "").trim())
+    if (n) n.pages.push(pg)
+  }
+  for (const pg of filtered.value) if (!(pg.entry || "").trim()) out.push({ type: "page", pg, depth: 0 })
+  const seen = new Set()
+  const walk = (node, depth) => {
+    if (seen.has(node.text)) return
+    seen.add(node.text)
+    const pages = node.pages
+    out.push({ type: "menu", text: node.text, depth, nPages: pages.length })
+    for (const c of node.children) walk(c, depth + 1)
+    for (const pg of pages) out.push({ type: "page", pg, depth: depth + 1 })
+  }
+  tops.forEach(n => walk(n, 0))
+  const inTree = new Set(out.filter(r => r.type === "page").map(r => r.pg.id))
+  for (const pg of filtered.value) if (!inTree.has(pg.id)) out.push({ type: "page", pg, depth: 0 })
+  return out
+})
+
+function pageLabel(pg) {
+  try {
+    const t = new URLSearchParams(pg.path.split("?")[1] || "").get("tourl")
+    if (t) return t
+  } catch { /* 非法查询串按原路径展示 */ }
+  return pg.path.split("?")[0]
+}
+
+const stats = computed(() => ({
+  pages: mapList.value.length,
+  elements: mapList.value.reduce((n, p) => n + p.buttons.length + p.links.length, 0),
+  roles: [...new Set(mapList.value.flatMap(p => (p.roles || '').split(',').filter(Boolean)))],
+  lastScan: mapList.value.map(p => p.scanned_at).filter(Boolean).sort().reverse()[0] || '',
+}))
+
 onMounted(async () => {
   projects.value = await api('/projects')
-  if (projects.value.length) pid.value = projects[0].id
+  if (projects.value.length) pid.value = projects.value[0].id
 })
 </script>
 
@@ -130,35 +201,94 @@ onMounted(async () => {
   </div>
   <div v-if="note" class="muted" style="font-size:12.5px;margin-bottom:10px">{{ note }}</div>
 
-  <div class="panel" v-if="projects.length">
-    <div v-for="pg in mapList" :key="pg.id"
-         style="border:1px solid var(--line);border-radius:7px;padding:8px 12px;margin:8px 0">
-      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
-        <span class="chip">L{{ pg.depth }}</span>
-        <span v-if="pg.source !== 'scan'" class="chip" :title="'来源：' + (SOURCE_LABEL[pg.source] || pg.source)">{{ SOURCE_LABEL[pg.source] || pg.source }}</span>
-        <b class="mono" style="font-size:12.5px;word-break:break-all">{{ pg.path }}</b>
-        <span class="muted" style="font-size:12px">{{ pg.title }}</span>
-        <span v-if="pg.roles" class="faint" style="font-size:11px" :title="`见到该页的角色：${pg.roles}`">👤 {{ pg.roles }}</span>
-        <span class="faint" style="font-size:11px;margin-left:auto">{{ pg.scanned_at?.slice(0, 16).replace('T', ' ') }}</span>
+  <div class="panel" v-if="projects.length && mapList.length">
+    <!-- 统计条 -->
+    <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;padding:2px 4px 10px;border-bottom:1px solid var(--line);margin-bottom:10px">
+      <span class="muted" style="font-size:12.5px">页面 <b style="color:var(--ink)">{{ stats.pages }}</b></span>
+      <span class="muted" style="font-size:12.5px">元素 <b style="color:var(--ink)">{{ stats.elements }}</b></span>
+      <span class="muted" style="font-size:12.5px" v-if="stats.roles.length">角色 <b style="color:var(--ink)">{{ stats.roles.join('、') }}</b></span>
+      <span class="faint" style="font-size:11.5px;margin-left:auto">最近扫描 {{ stats.lastScan.slice(0, 16).replace('T', ' ') }}</span>
+    </div>
+    <!-- 双栏：左清单 / 右详情 -->
+    <div style="display:flex;gap:0;align-items:stretch">
+      <div style="width:330px;flex:none;border-right:1px solid var(--line);padding-right:10px">
+        <input v-model="kw" placeholder="搜索页面 / 标题 / 按钮…" style="width:100%;margin-bottom:8px">
+        <div style="max-height:58vh;overflow:auto">
+          <template v-if="!kw.trim()">
+            <template v-for="row in menuRows" :key="row.type + (row.text || row.pg.id)">
+              <div v-if="row.type === 'menu'"
+                   :style="{ padding: '6px 10px 4px', paddingLeft: (8 + row.depth * 12) + 'px' }">
+                <b style="font-size:12.5px">{{ row.text }}</b>
+                <span class="faint" style="font-size:11px;margin-left:6px">{{ row.nPages }} 页</span>
+              </div>
+              <div v-else @click="selId = row.pg.id"
+                   :style="{ cursor: 'pointer', padding: '6px 10px', paddingLeft: (20 + row.depth * 12) + 'px', borderRadius: '6px', marginBottom: '2px',
+                             background: selPage && selPage.id === row.pg.id ? 'var(--acc-weak)' : 'transparent' }">
+                <div style="display:flex;gap:6px;align-items:center">
+                  <b class="mono" style="font-size:12px;word-break:break-all;flex:1">{{ pageLabel(row.pg) }}</b>
+                  <span class="faint" style="font-size:11px;flex:none">{{ row.pg.buttons.length }} 钮</span>
+                </div>
+              </div>
+            </template>
+            <div v-if="!menuRows.length" class="empty" style="font-size:12px">没有匹配的页面</div>
+          </template>
+          <template v-else>
+            <div v-for="pg in filtered" :key="pg.id" @click="selId = pg.id"
+                 :style="{ cursor: 'pointer', padding: '7px 10px', borderRadius: '6px', marginBottom: '2px',
+                           background: selPage && selPage.id === pg.id ? 'var(--acc-weak)' : 'transparent' }">
+              <div style="display:flex;gap:6px;align-items:center">
+                <span class="chip">L{{ pg.depth }}</span>
+                <b class="mono" style="font-size:12px;word-break:break-all;flex:1">{{ pg.path }}</b>
+                <span v-if="pg.source !== 'scan'" class="chip">{{ SOURCE_LABEL[pg.source] || pg.source }}</span>
+              </div>
+              <div style="display:flex;gap:6px;align-items:center;margin-top:2px">
+                <span class="muted" style="font-size:11.5px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ pg.title || '（无标题）' }}</span>
+                <span class="faint" style="font-size:11px;flex:none">{{ pg.buttons.length }} 钮{{ pg.links.length ? ' · ' + pg.links.length + ' 链' : '' }}</span>
+              </div>
+            </div>
+            <div v-if="!filtered.length" class="empty" style="font-size:12px">没有匹配的页面</div>
+          </template>
+        </div>
       </div>
-      <div v-if="pg.buttons.length" style="margin-top:5px;display:flex;flex-wrap:wrap;gap:4px">
-        <span v-for="(b, i) in pg.buttons" :key="'b' + i" class="chip"
-              :style="b.disabled ? 'opacity:.5;text-decoration:line-through' : ''"
-              :title="[b.selector,
-                       b.disabled ? '扫描时禁用' : '',
-                       b.source !== 'scan' ? '来源：' + (SOURCE_LABEL[b.source] || b.source) : '',
-                       b.state_note ? '条件：' + b.state_note : '',
-                       b.roles ? '角色：' + b.roles : ''].filter(Boolean).join('；')">
-          {{ b.text || b.selector || '按钮' }}<template v-if="b.source !== 'scan'"> ·{{ SOURCE_LABEL[b.source] || b.source }}</template><template v-if="b.state_note"> ※</template>
-        </span>
-      </div>
-      <div v-if="pg.links.length" style="margin-top:4px;font-size:12px" class="muted">
-        跳转：{{ pg.links.slice(0, 8).map(l => (l.text || '链接') + ' → ' + l.href).join('；') }}
-        {{ pg.links.length > 8 ? '…' : '' }}
+      <div style="flex:1;min-width:0;padding-left:14px;max-height:64vh;overflow:auto">
+        <template v-if="selPage">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:4px">
+            <span class="chip">L{{ selPage.depth }}</span>
+            <span v-if="selPage.source !== 'scan'" class="chip">{{ SOURCE_LABEL[selPage.source] || selPage.source }}</span>
+            <b class="mono" style="font-size:13px;word-break:break-all">{{ selPage.path }}</b>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+            <span style="font-size:15px;font-weight:600">{{ selPage.title || '（无标题）' }}</span>
+            <span v-if="selPage.roles" class="chip">👤 {{ selPage.roles }}</span>
+            <span class="faint" style="font-size:11.5px;margin-left:auto">扫描于 {{ selPage.scanned_at?.slice(0, 16).replace('T', ' ') }}</span>
+          </div>
+          <div class="muted" style="font-size:12px;margin-bottom:6px">按钮 / 可点元素（{{ selPage.buttons.length }}）</div>
+          <table v-if="selPage.buttons.length">
+            <thead><tr><th>文本</th><th>选择器</th><th>状态</th><th>来源</th><th>说明</th><th>角色</th></tr></thead>
+            <tbody>
+              <tr v-for="(b, i) in selPage.buttons" :key="'b' + i">
+                <td style="max-width:180px;word-break:break-all">{{ b.text || '—' }}</td>
+                <td class="mono" style="font-size:11.5px;max-width:180px;word-break:break-all">{{ b.selector || '—' }}</td>
+                <td><span :class="b.disabled ? 'st err' : 'st ok'">{{ b.disabled ? '禁用' : '可用' }}</span></td>
+                <td><span class="chip">{{ SOURCE_LABEL[b.source] || b.source }}</span></td>
+                <td class="muted" style="font-size:11.5px;max-width:150px">{{ b.state_note || '—' }}</td>
+                <td class="muted" style="font-size:11.5px">{{ b.roles || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-if="!selPage.buttons.length" class="empty" style="font-size:12px">该页面没有记录到按钮</div>
+          <div v-if="selPage.links.length" style="margin-top:14px">
+            <div class="muted" style="font-size:12px;margin-bottom:6px">跳转关系（{{ selPage.links.length }}）</div>
+            <div style="display:flex;flex-wrap:wrap;gap:4px">
+              <span v-for="(l, i) in selPage.links" :key="'l' + i" class="chip">{{ l.text || '链接' }} → {{ l.href }}</span>
+            </div>
+          </div>
+        </template>
+        <div v-else class="empty" style="font-size:12.5px">左侧选择一个页面查看按钮与跳转详情</div>
       </div>
     </div>
-    <div v-if="!mapList.length && !busy" class="empty">还没有地图数据，选好项目与登录角色后点「扫描」生成</div>
   </div>
+  <div class="panel" v-else-if="projects.length"><div class="empty">还没有地图数据，选好项目与登录角色后点「扫描」生成</div></div>
   <div class="panel" v-else><div class="empty">请先创建项目</div></div>
 
   <!-- 导入 / 人工维护：upsert 合并写入（页面按 path、元素按 kind+text 同键更新，不删已有数据） -->

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onUnmounted } from 'vue'
 import { api } from '../api'
 import { toast, alertDialog } from '../dialog'
 
@@ -51,29 +51,34 @@ async function solidify() {
   finally { solidifying.value = false }
 }
 
+let poll = null
+onUnmounted(() => { if (poll) clearInterval(poll) })
+
 async function run() {
   running.value = true; result.value = null; err.value = ''
   const path = props.caseId ? `/runs/cases/${props.caseId}/run` : `/runs/plans/${props.planId}/run`
-  // 后端边执行边把明细写库；请求返回前先轮询最新一条 running 记录，步骤实时显示
-  const filter = props.caseId ? `case=${props.caseId}` : `plan=${props.planId}`
-  const poll = setInterval(async () => {
-    try {
-      const r = await api(`/runs?${filter}&size=1`)
-      const cur = r.items?.[0]
-      if (cur && cur.status === 'running') {
-        curRunId = cur.id
-        result.value = await api('/runs/' + cur.id)
-      }
-    } catch { /* 轮询失败忽略，等下一轮 */ }
-  }, 1200)
   try {
-    result.value = await api(path, { method: 'POST', body: { env_id: envId.value } }, { timeout: 600000 })
+    // 触发接口立即返回 running 记录（执行在后台继续），轮询直到结束
+    result.value = await api(path, { method: 'POST', body: { env_id: envId.value } })
     emit('done')
-  } catch (e) { err.value = e.message } finally {
-    running.value = false
-    curRunId = ''
-    clearInterval(poll)
-  }
+    if (result.value.status === 'running') {
+      curRunId = result.value.id
+      poll = setInterval(async () => {
+        try {
+          const r = await api('/runs/' + curRunId)
+          result.value = r
+          if (r.status !== 'running') {
+            clearInterval(poll); poll = null
+            curRunId = ''
+            running.value = false
+            emit('done')
+          }
+        } catch { /* 瞬时失败等下一轮 */ }
+      }, 1500)
+    } else {
+      running.value = false
+    }
+  } catch (e) { err.value = e.message; running.value = false }
 }
 
 let curRunId = ''
@@ -85,6 +90,16 @@ async function cancel() {
 // 结果展示：单用例 detail 是步骤数组，计划 detail 是用例数组
 const steps = computed(() => result.value ? (result.value.case_id ? result.value.detail : null) : null)
 const casesOfPlan = computed(() => result.value ? (result.value.plan_id ? result.value.detail : null) : null)
+
+// 过程折叠：默认只展开最后的 done 结论步骤（含截图）与录像，前面的过程步骤折一行
+const folded = ref(true)
+const tail = computed(() => {
+  const list = steps.value || []
+  const doneIdx = list.map((s, i) => (s.action === 'done' ? i : -1)).filter(i => i >= 0)
+  const start = doneIdx.length ? doneIdx[doneIdx.length - 1] : Math.max(0, list.length - 1)
+  return { start, list: list.slice(start) }
+})
+const foldCount = computed(() => tail.value.start)
 
 // 计划条目展开：点一行看该用例/流程内部的步骤明细
 const expandedItem = ref(-1)
@@ -113,7 +128,7 @@ function toggleItem(i) { expandedItem.value = expandedItem.value === i ? -1 : i 
             <span v-else :class="result.status === 'passed' ? 'st ok' : 'st err'">{{ result.status === 'passed' ? '全部通过' : '有一步没通过' }}</span>
           </h3>
           <div style="display:flex;gap:8px;align-items:center">
-            <span class="mono muted">{{ result.duration }}s · 通过 {{ result.pass_n }} / 失败 {{ result.fail_n }}</span>
+            <span class="mono muted">{{ result.duration }}s · 通过 {{ result.pass_n }} / 失败 {{ result.fail_n }}<template v-if="result.tokens != null"> · Token {{ result.tokens.toLocaleString() }}</template></span>
             <button v-if="caseType === 'ai' && result.case_id && result.status === 'passed'" class="btn sm pri"
               :disabled="solidifying" @click="solidify">{{ solidifying ? '固化中…' : '固化为普通 UI 用例' }}</button>
             <button v-if="result.status === 'failed'" class="btn sm" :disabled="aiLoading" @click="analyze">
@@ -128,7 +143,11 @@ function toggleItem(i) { expandedItem.value = expandedItem.value === i ? -1 : i 
         </div>
 
         <template v-if="steps">
-          <div v-for="s in steps" :key="s.idx" style="border:1px solid var(--line);border-radius:7px;padding:10px 12px;margin-bottom:8px">
+          <div v-if="foldCount > 0" style="border:1px dashed var(--line);border-radius:7px;padding:7px 12px;margin-bottom:8px;display:flex;gap:8px;align-items:center">
+            <span class="muted" style="font-size:12.5px">{{ folded ? '已折叠 ' + foldCount + ' 步过程明细' : '过程明细已全部展开（' + steps.length + ' 步）' }}</span>
+            <button class="btn sm" @click="folded = !folded">{{ folded ? '展开全部' : '收起，只看结论' }}</button>
+          </div>
+          <div v-for="s in (folded ? tail.list : steps)" :key="s.idx" style="border:1px solid var(--line);border-radius:7px;padding:10px 12px;margin-bottom:8px">
             <div style="display:flex;gap:8px;align-items:center">
               <span :class="s.pass ? 'st ok' : 'st err'">{{ s.pass ? '通过' : '未通过' }}</span>
               <span class="mono" style="font-size:12.5px">{{ s.action ? '[' + s.action + '] ' + s.target : s.m + ' ' + s.url }}</span>

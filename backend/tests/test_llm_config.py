@@ -88,3 +88,66 @@ def test_llm_admin_only():
     assert client.get("/api/v1/settings/llm", headers=H2).status_code == 403
     assert _add(client, H2, "x", "m").status_code == 403
     _cleanup()
+
+
+def test_llm_log_run_attribution():
+    """llm_logs.run_id：run_context 内的调用归属到执行记录，外部调用为空。"""
+    from app import ai as A
+    from app.db import SessionLocal
+    from app.models import LLMLog
+    db = SessionLocal()
+    db.query(LLMLog).delete(); db.commit()
+    with A.run_context("R-attr-1"):
+        A._log_usage("agent-step", 100, 50, True, model="m1")
+    A._log_usage("agent-step", 10, 5, True, model="m1")
+    rows = db.query(LLMLog).all()
+    by_run = {r.run_id: r for r in rows}
+    assert by_run["R-attr-1"].prompt_tokens == 100
+    assert by_run[""].completion_tokens == 5
+    db.close()
+
+
+def test_usage_daily_breakdown():
+    """usage_summary 的 daily：最近 14 天按天聚合（日期倒序）。"""
+    from datetime import datetime, timedelta
+    from app import ai as A
+    from app.db import SessionLocal
+    from app.models import LLMLog
+    db = SessionLocal()
+    db.query(LLMLog).delete(); db.commit()
+    now = datetime.utcnow()
+    db.add(LLMLog(kind="agent-step", model="m", prompt_tokens=500, completion_tokens=100,
+                  ok=True, created_at=now))
+    db.add(LLMLog(kind="agent-step", model="m", prompt_tokens=200, completion_tokens=30,
+                  ok=False, created_at=now - timedelta(days=2)))
+    db.commit(); db.close()
+    u = A.usage_summary(days=14)
+    assert u["calls"] == 2 and u["prompt_tokens"] == 700
+    dates = {d["date"]: d for d in u["daily"]}
+    today = now.date().isoformat()
+    d2 = (now - timedelta(days=2)).date().isoformat()
+    assert dates[today]["calls"] == 1 and dates[today]["completion_tokens"] == 100
+    assert dates[d2]["calls"] == 1 and dates[d2]["failed"] == 1
+    assert [d["date"] for d in u["daily"]] == sorted([today, d2], reverse=True)
+
+
+def test_run_detail_tokens():
+    """GET /runs/{rid} 与列表带 tokens（llm_logs 按 run_id 汇总）。"""
+    from app.db import SessionLocal
+    from app.models import TestRun
+    client = _client()
+    H = _login(client)
+    pid = client.post("/api/v1/projects", json={"name": "P-tok"}, headers=H).json()["id"]
+    db = SessionLocal()
+    run = TestRun(id="R-tok-1", case_id=None, status="failed", pass_n=0, fail_n=1)
+    db.add(run); db.commit(); db.close()
+    from app import ai as A
+    with A.run_context("R-tok-1"):
+        A._log_usage("agent-step", 300, 60, True, model="m")
+        A._log_usage("agent-step", 40, 10, True, model="m")
+    d = client.get("/api/v1/runs/R-tok-1", headers=H).json()
+    assert d["tokens"] == 410
+    items = client.get("/api/v1/runs", headers=H).json()["items"]
+    assert any(i["id"] == "R-tok-1" and i["tokens"] == 410 for i in items)
+    client.delete("/api/v1/projects/" + pid, headers=H)
+    client.__exit__(None, None, None)

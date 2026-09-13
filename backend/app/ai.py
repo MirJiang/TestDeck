@@ -5,6 +5,7 @@
 """
 import re
 import json
+from contextlib import contextmanager
 import time
 import httpx
 
@@ -174,13 +175,33 @@ def test_connection(base_url: str = "", api_key: str = "", model: str = "") -> d
                 "ms": int((time.time() - t0) * 1000)}
 
 
-def _log_usage(kind, pt, ct, ok, model=""):
+_run_id_ctx = None   # ContextVar（懒初始化，避免模块导入期依赖 db）
+
+
+@contextmanager
+def run_context(run_id: str):
+    """标记当前线程后续 LLM 调用归属的执行记录：llm_logs.run_id 按次统计用。
+
+    执行队列线程是常驻的，必须用完即 reset，防止串号到下一个执行。"""
+    global _run_id_ctx
+    if _run_id_ctx is None:
+        from contextvars import ContextVar
+        _run_id_ctx = ContextVar("llm_run_id", default="")
+    token = _run_id_ctx.set(run_id or "")
+    try:
+        yield
+    finally:
+        _run_id_ctx.reset(token)
+
+
+def _log_usage(kind, pt, ct, ok, model="", run_id=""):
     from .db import SessionLocal
     from .models import LLMLog
     db = SessionLocal()
     try:
         db.add(LLMLog(kind=kind, model=model or current_model(),
-                      prompt_tokens=pt, completion_tokens=ct, ok=ok))
+                      prompt_tokens=pt, completion_tokens=ct, ok=ok,
+                      run_id=run_id or (_run_id_ctx.get() if _run_id_ctx else "") or ""))
         db.commit()
     except Exception:
         pass
@@ -188,18 +209,34 @@ def _log_usage(kind, pt, ct, ok, model=""):
         db.close()
 
 
-def usage_summary() -> dict:
+def usage_summary(days: int = 14) -> dict:
+    """LLM 用量：累计总量 + 最近 N 天按天细分（日期倒序，含今天）。"""
+    from datetime import datetime, timedelta
     from .db import SessionLocal
     from .models import LLMLog
     db = SessionLocal()
     try:
         rows = db.query(LLMLog).all()
-        return {"calls": len(rows),
-                "prompt_tokens": sum(r.prompt_tokens for r in rows),
-                "completion_tokens": sum(r.completion_tokens for r in rows),
-                "failed": sum(1 for r in rows if not r.ok),
-                "model": current_model() if llm_available() else "",
-                "source": cfg_source()}
+        out = {"calls": len(rows),
+               "prompt_tokens": sum(r.prompt_tokens for r in rows),
+               "completion_tokens": sum(r.completion_tokens for r in rows),
+               "failed": sum(1 for r in rows if not r.ok),
+               "model": current_model() if llm_available() else "",
+               "source": cfg_source(), "daily": []}
+        cutoff = datetime.utcnow().date() - timedelta(days=max(1, days) - 1)
+        agg: dict = {}
+        for r in rows:
+            if not r.created_at or r.created_at.date() < cutoff:
+                continue
+            d = r.created_at.date().isoformat()
+            a = agg.setdefault(d, {"date": d, "calls": 0, "prompt_tokens": 0,
+                                   "completion_tokens": 0, "failed": 0})
+            a["calls"] += 1
+            a["prompt_tokens"] += r.prompt_tokens or 0
+            a["completion_tokens"] += r.completion_tokens or 0
+            a["failed"] += 1 if not r.ok else 0
+        out["daily"] = sorted(agg.values(), key=lambda x: -int(x["date"].replace("-", "")))
+        return out
     finally:
         db.close()
 

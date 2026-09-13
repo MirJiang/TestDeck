@@ -209,7 +209,7 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
             r, attempt = {}, 0
             for attempt in range(retries + 1):
                 r = ai_drive(page, val, {**role_vars.get(role, {}), **shared},
-                             max_steps=60, run_id=run_id, shot_tag=f"{run_id}-{tag}",
+                             max_steps=200, run_id=run_id, shot_tag=f"{run_id}-{tag}",
                              page_map=app_map_brief(getattr(flow, "project_id", "")),
                              project_id=getattr(flow, "project_id", "") or "")
                 if r.get("status") == "passed":
@@ -339,7 +339,7 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
                     page.goto(surl, timeout=20000)
                 ai_vars = {**shared, **role_vars[role]}
                 r_ai = ai_drive(page, goal, ai_vars,
-                                max_steps=int(cfg.get("max_steps") or 15),
+                                max_steps=int(cfg.get("max_steps") or 200),
                                 run_id=run_id, shot_tag=tag,
                                 project_id=getattr(flow, "project_id", "") or "")
                 shared.update(r_ai.get("saved") or {})
@@ -392,7 +392,7 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
                             page.goto(surl, timeout=20000)
                         ai_vars = {**shared, **role_vars[role]}
                         r_ai = ai_drive(page, goal, ai_vars,
-                                        max_steps=int(step.get("max_steps") or 15),
+                                        max_steps=int(step.get("max_steps") or 200),
                                         run_id=run_id, shot_tag=f"flow{i}",
                                         project_id=getattr(flow, "project_id", "") or "")
                         shared.update(r_ai["saved"])

@@ -33,6 +33,7 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field
 
 from .. import ai as A
+from .. import config
 from . import queue as _q
 from .ai_runner import _STATE_JS, _exec_action, _model_hint, DEFAULT_MAX_STEPS
 from .ui_runner import STATIC_DIR
@@ -97,6 +98,7 @@ class Harness:
         self.last_fail_key, self.same_fail = None, 0
         self.last_warn = ""
         self.usage: list[dict] = []    # [{model, input_tokens, output_tokens, ok}]
+        self._prev_state = None        # 上一次 state_text 的 (url, 元素集合签名)，增量回报用
         self.calls: SimpleQueue = SimpleQueue()   # (fn, args, future) → 队列线程执行
 
     # ---------- 跨线程桥接 ----------
@@ -172,6 +174,10 @@ class Harness:
         self.detail.append(entry)
         self.pass_n, self.fail_n = self.pass_n + (1 if ok else 0), self.fail_n + (0 if ok else 1)
         self._emit()
+        try:
+            self.page.wait_for_timeout(300)   # SPA：给子菜单展开/页面渲染留时间，工具返回的状态才是最新的
+        except Exception:
+            pass
 
         # 断路器：同一动作+selector 连续失败 3 次，立即终止（避免模型反复撞墙）
         if not ok:
@@ -226,15 +232,30 @@ class Harness:
             return None
 
     def state_text(self) -> str:
-        """最新页面状态文本（与旧循环注入给模型的状态同构），失败时给降级说明。"""
+        """最新页面状态文本（与旧循环注入给模型的状态同构），失败时给降级说明。
+
+        与上一步同页面且可交互元素集合一致时，只回紧凑摘要——状态文本会在后续
+        每轮对话里反复重发，这是长表单执行最大的 token 开销（实测占六成以上）。"""
         try:
             state = self.page.evaluate(_STATE_JS)
         except Exception as e:
             return f"页面状态读取失败：{e}"
-        els = "; ".join(f"[{e['tag']}] {e['text'] or e['value']} → {e['selector']}"
-                        for e in state.get("elements", [])[:40]) or "无"
-        return (f"当前页面：{state.get('url', '')}「{state.get('title', '')}」\n"
-                f"可交互元素：{els}\n页面文字：{state.get('text', '')}")
+        url = state.get("url", "")
+        els = state.get("elements", [])
+        keys = tuple((e["selector"], "" if e["tag"] in ("input", "textarea") else e["text"])
+                     for e in els)
+        prev = self._prev_state
+        if prev and prev["url"] == url and prev["keys"] == keys:
+            vals = {e["selector"]: e.get("value", "") for e in els if e.get("value")}
+            changed = [f"{s} → {v[:24]}" for s, v in vals.items() if prev["vals"].get(s) != v]
+            extra = ("；输入值已更新：" + "；".join(changed[:6])) if changed else ""
+            return f"当前页面：{url}（可交互元素与上一步一致，无新增/消失{extra}）"
+        self._prev_state = {"url": url, "keys": keys,
+                            "vals": {e["selector"]: e.get("value", "") for e in els if e.get("value")}}
+        els_txt = "; ".join(f"[{e['tag']}] {e['text'] or e['value']} → {e['selector']}"
+                            for e in els) or "无"
+        return (f"当前页面：{url}「{state.get('title', '')}」\n"
+                f"可交互元素：{els_txt}\n页面文字：{state.get('text', '')}")
 
     # ---------- 结果组装 ----------
 
@@ -299,14 +320,21 @@ def build_model_chain(on_usage: Callable[[str, int, int, bool], None] | None = N
     entries = _chain_entries()
     if not entries:
         return None
+    ctx = 0
+    try:
+        ctx = int(config.get("TD_MODEL_CONTEXT_SIZE") or 65536)
+    except (TypeError, ValueError):
+        ctx = 65536
     models = []
     for base, key, model in entries:
+        kwargs = {"context_size": ctx} if ctx > 0 else {}
         models.append(OpenAIChatModel(
             credential=OpenAICredential(api_key=key, base_url=base),
             model=model,
             stream=False,               # 与旧循环一致：非流式，用量一次性拿到
             max_retries=1,              # 单档快速失败，交给回退链换档
             parameters=OpenAIChatModel.Parameters(temperature=0.1),
+            **kwargs,
         ))
     return make_fallback_model(models, on_usage=on_usage)
 
@@ -475,7 +503,7 @@ def run_brain(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STE
 
     def _on_usage(model, pt, ct, ok):
         try:
-            A._log_usage("agent-step", pt, ct, ok, model=model)
+            A._log_usage("agent-step", pt, ct, ok, model=model, run_id=run_id)
         except Exception:
             pass
 

@@ -391,3 +391,52 @@ def test_vision_look_tool(stub_llm, monkeypatch):
     assert r["status"] == "passed"
     assert [d["action"] for d in r["detail"]] == ["click_xy", "done"]   # look 不记为动作步骤
     assert ("mouse_click", 50, 300) in page.calls                       # 坐标点击落地
+
+
+def test_state_text_unchanged_compact(stub_llm):
+    """同页面元素集合一致时，工具返回的状态只回紧凑摘要（token 优化主手段）。"""
+    h = B.Harness(FakePage(), "目标", {}, "r1", "ai", None, "", "", "", vision=False, max_actions=10)
+    t1 = h.state_text()
+    assert "可交互元素" in t1                                   # 首次回全量
+    t2 = h.state_text()
+    assert "可交互元素与上一步一致" in t2 and "页面文字" not in t2
+
+
+def test_state_text_value_change_and_full(stub_llm):
+    """输入值变化在摘要里单独列出；元素集合变化（子菜单展开等）回全量。"""
+    h = B.Harness(FakePage(), "目标", {}, "r1", "ai", None, "", "", "", vision=False, max_actions=10)
+    h.state_text()
+    page = h.page
+    page.state = {**page.state, "elements": [
+        {"selector": "#u", "tag": "input", "text": "", "value": "已填的值"},
+        {"selector": "#btn", "tag": "button", "text": "登 录", "value": ""}]}
+    t2 = h.state_text()
+    assert "可交互元素与上一步一致" in t2 and "输入值已更新" in t2 and "已填的值" in t2
+    page.state = {**page.state, "elements": [
+        {"selector": "#u", "tag": "input", "text": "", "value": "已填的值"},
+        {"selector": "text=\"新菜单项\"", "tag": "li", "text": "新菜单项", "value": ""}]}
+    t3 = h.state_text()
+    assert "可交互元素" in t3 and "新菜单项" in t3                # 集合变化 → 全量
+
+
+def test_chain_context_size_config(monkeypatch, stub_llm):
+    """TD_MODEL_CONTEXT_SIZE 下发到链上模型（压缩阈值 = trigger_ratio × context_size）。"""
+    from app.db import SessionLocal
+    from app.models import LLMConfig
+    db = SessionLocal()
+    db.add(LLMConfig(name="ctx", vendor="X", url_type="api",
+                     base_url="https://api.x.com/v1", api_key="sk-x", model="m-ctx",
+                     is_active=True))
+    db.commit(); db.close()
+    config.set("TD_MODEL_CONTEXT_SIZE", "65536")
+    try:
+        m = B.build_model_chain()
+        assert m.chain[0].context_size == 65536
+        config.set("TD_MODEL_CONTEXT_SIZE", "0")
+        m2 = B.build_model_chain()
+        assert m2.chain[0].context_size == 128000        # 0 = 用框架默认
+    finally:
+        config.unset("TD_MODEL_CONTEXT_SIZE")
+        db = SessionLocal()
+        db.query(LLMConfig).filter(LLMConfig.name == "ctx").delete()
+        db.commit(); db.close()

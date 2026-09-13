@@ -24,7 +24,7 @@
 | MCP 服务 | 平台能力暴露为 MCP 工具（`/mcp`，Streamable HTTP）：外部 AI agent 带平台 token 即可查项目/用例、跑测试、看结果、上传应用地图、**借受控浏览器会话干活**（白名单动作，无 shell/文件能力） |
 | 应用地图 | **期望基线**（只由扫描/源码分析/人工写入，执行观察不回写）：多角色扫描合并按角色可见性、元素带来源（扫描/源码/人工）与状态备注；AI 执行时每步比对，地图按钮缺失记**警告**（元素级回归信号，不判失败） |
 | 回归建议 | 工作台提示超 14 天未执行的用例与近 7 天新提交 |
-| 运维 | 截图 30 天自动清理（`TD_KEEP_DAYS`）；LLM 调用与 token 用量记录 |
+| 运维 | 截图 30 天自动清理（`TD_KEEP_DAYS`）；LLM 调用与 token 用量记录（按次归属执行记录，执行列表/详情可见；模型配置页按天汇总近 14 天） |
 
 ## 2. 系统架构
 
@@ -56,7 +56,7 @@ FastAPI 后端（uvicorn，单进程）
 - **执行队列（默认串行，可开并发）**：所有测试提交到同一个线程池，默认 1 个 worker 天然串行——避免并发写冲突，也杜绝跨线程事件循环问题。团队规模上来后 `.env` 设 `TD_WORKERS=N`（≤16）开启并发执行；SQLite 已配 `busy_timeout`，多 worker 写锁等待自动重试，生产建议切 PostgreSQL/MySQL。
 - **数据库可插拔**：SQLAlchemy 适配层，默认 SQLite（零配置，本地开发与测试）；生产设 `TD_DATABASE_URL` 一键切 PostgreSQL 或 MySQL（Docker 部署已内置 PostgreSQL 16，健康检查就绪后才启动后端）。`python -m app.cli.db_migrate --to <连接串>` 可把现有 SQLite 数据迁入。
 - **AI 决策循环（AgentScope，B4 基准达标后唯一路径）**：`ai_drive` 门面委托 AgentScope ReAct agent——动作注册为白名单工具、done 走结构化输出、模型走 llm_configs 多模型回退链（失败自动换下一档）。真实环境基准（登录用例各 3 轮）：成功率 1/3 vs legacy 0/3（通过轮当场解开点选验证码）、平均 22.5s vs 94.7s；token 偏高（≈3 倍，思考模式 + ReAct 重发历史）但绝对值可忽略。防失控机制：连续 3 次相同动作失败熔断、最大步数上限、取消即停、token 用量入 `llm_logs`。模型兼容层（`brain_agentscope`）：思考模式模型（DeepSeek 等）拒绝 tool_choice="none"/强制函数，回退链自动降级；工具函数返回 ToolChunk 保证截图以 image_url 进消息（返回 ToolResponse 会被序列化成文本，一张截图 ≈13 万 token 撑爆上下文）。
-- **渐进式进度**：AI 用例每执行一步、计划每完成一条用例即增量写库；前端轮询渲染，无需长连接。
+- **渐进式进度**：AI 用例每执行一步、计划每完成一条用例即增量写库；前端轮询渲染，无需长连接。触发接口立即返回（执行在队列线程继续），避免长执行把 HTTP 请求拖到超时。
 
 ## 3. 目录结构
 
@@ -105,7 +105,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 - 每轮发给模型：目标、可用变量（含角色/共享变量）、最近 12 步历史、可见交互元素（选择器含 id/name/placeholder/type/同标签序号兜底）、页面文字摘要；若模型配置勾选「支持视觉」再附当前视口截图。
 - 模型动作集：`goto / click / click_xy / drag / fill / expect_text / save / done`。
 - **AgentScope Brain（唯一决策循环）**：`ai_drive` 委托 AgentScope ReAct agent（`engine/brain_agentscope.py`）——动作集注册为白名单工具（权限引擎 DONT_ASK + ALLOW 规则强制，绝不注册 shell/文件/代码执行类工具）、done 走结构化输出、模型走 llm_configs 多模型回退链（失败自动换下一档）、视觉模式经 `browser_look` 工具按需取截图（实测可解开点选验证码）。执行明细/on_step 流式进度/取消/断路器/token 记账与页面状态注入与旧循环同构，调用方零改动。
-- 防失控：连续 3 次相同动作失败熔断；最大步数上限；每次执行记录 token 用量。
+- 防失控：连续 3 次相同动作失败熔断；最大步数上限（默认 200，用例/流程步骤可调）；每次执行的 token 消耗按 run_id 归属 `llm_logs`，执行列表/详情与模型配置页（按天）可见。**token 优化**：工具每步返回的页面状态做增量回报——同页面且元素集合一致时只回紧凑摘要（输入值变化单独列出），这是长表单执行最大的 token 开销；上下文压缩阈值由 `TD_MODEL_CONTEXT_SIZE` 控制（默认 65536，0=用模型默认 128k），长执行更早触发历史压缩。
 - 固化：AI 跑通后可把操作明细转存为普通 UI 用例，回归零 token。
 
 ### 4.4 浏览器引擎
@@ -123,7 +123,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 
 ### 4.4c 应用地图（期望基线 · AI 的系统先验知识）
 - **定位（所有者定调）**：地图 = 期望模型/基线，只由三个来源写入——`scan` 爬取 / `code` 源码分析（skills/app-map-source-scan 经 MCP 上传，ground truth）/ `manual` 人工 upsert；**执行观察永远不回写地图**，否则"本来该有按钮现在没有"的回归信号就消失了。
-- **多角色扫描**：扫描时可勾选多个测试用户，逐个 AI 代劳登录后单独爬取，按 path 合并——页面与元素记录 `roles`（哪些角色见过），按钮"任一角色可点即算可点"。重扫只全量替换 scan 来源的页面/元素，code/manual 来源保留。
+- **多角色扫描**：扫描时可勾选多个测试用户，逐个 AI 代劳登录后单独爬取，按 path 合并——页面与元素记录 `roles`（哪些角色见过），按钮"任一角色可点即算可点"。重扫只全量替换 scan 来源的页面/元素，code/manual 来源保留。爬取采用**点击探索**：除跟 `<a href>` 外，逐个点击可见可点元素（含 li/div 菜单项）发现新页面——SPA 的 JS 菜单（如 div.sub-menu-item 子菜单）不再是盲区；登录成败由爬取器按页面内容判定（不采信 AI 结论，验证码失败自动换一张重试一次），每页探索前先尝试关闭公告弹窗；探索点击带破坏性文案黑名单（退出/删除/提交等绝不点）。可交互元素的识别是**通用的**（借鉴开源浏览器 Agent browser-use 的信号集思路，无任何站点特定规则）：原生交互标签 ∪ 交互性 ARIA role ∪ tabindex ∪ onclick/contenteditable ∪ 计算样式 cursor:pointer ∪ menu/nav 类名约定，可见性三重判定（矩形+computed style+遮挡 elementFromPoint）；共享判定逻辑在 `app/engine/web_interact.py`（状态提取/点击探索/地图提取三处复用）。
 - 产出：页面清单（路径/标题/层级/来源/角色）、每页按钮（含禁用状态、来源、`state_note` 出现条件备注）与链接（跳转关系），存 `app_pages`/`app_elements`。
 - 注入：AI 用例执行、流程 AI 步骤、固定步骤回放的 ai 动作都会把地图摘要注入提示词（页面关系 + 按钮清单 + 条件备注），AI 不再只看当前页盲猜。
 - **执行比对信号（元素级回归检测）**：ai_drive 每步把当前页 DOM 与地图比对，地图记录的按钮缺失时在执行明细记 `warning`（不判失败、不计入通过/失败数；`state_note` 非空的条件性元素跳过比对）；前端执行明细/报告与导出 HTML 展示警告，MCP run_get 原样透出。
@@ -161,7 +161,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 | 认证 | `POST /auth/login` · `GET /auth/me` · `POST/GET /auth/users` · `PUT /auth/password` · `PUT /auth/users/{uid}/password` |
 | 项目 | `GET/POST /projects` · `PUT/DELETE /projects/{pid}` · `GET/POST /projects/{pid}/envs`（一项目仅一条）· `PUT/DELETE .../envs/{eid}` · `GET/POST /projects/{pid}/users` · `PUT/DELETE .../users/{uid}` · `POST .../users/import` · `GET/POST /projects/{pid}/members` · `DELETE .../members/{uid}` |
 | 用例 | `GET/POST /projects/{pid}/cases` · `POST /projects/{pid}/cases/import-assets`（HAR/Postman）· `GET/PUT/DELETE /cases/{cid}` · `POST /cases/{cid}/copy` |
-| 执行 | `POST /runs/cases/{cid}/run` · `POST /runs/plans/{pid}/run` · `GET /runs` · `GET /runs/{rid}` · `GET /runs/{rid}/export` · `GET /runs/export.csv` |
+| 执行 | `POST /runs/cases/{cid}/run` · `POST /runs/plans/{pid}/run`（均立即返回 running 记录，后台执行、前端轮询进度；MCP 的 case_run 保持同步等待）· `GET /runs` · `GET /runs/{rid}`（含 tokens 消耗） · `GET /runs/{rid}/export` · `GET /runs/export.csv` |
 | 流程 | `GET/POST /flows` · `GET/PUT/DELETE /flows/{fid}` · `POST /flows/{fid}/run` · `GET /flows/{fid}/runs` · `GET /flows/runs/{rid}/detail` |
 | 计划 | `GET/POST /plans` · `PUT/DELETE /plans/{pid}` |
 | Git | `GET/POST /integrations/git/repos` · `DELETE .../repos/{rid}` · `GET /integrations/git/commits` · `POST /integrations/git/webhook/{secret}` |
@@ -188,6 +188,8 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 | `TD_MCP` | `1` | 设 0 关闭 MCP 服务（/mcp 端点与工具） |
 | `TD_PUBLIC_URL` | 未设 | 平台对外访问地址（如 `https://td.corp.com`）：MCP 配置里的接入 URL 优先用它，避免反向代理改写 Host 导致地址错误 |
 | `TD_KEEP_DAYS` | `30` | 截图与执行录像保留天数 |
+| `TD_MODEL_CONTEXT_SIZE` | `65536` | 模型上下文窗口声明（token）：压缩阈值=0.8×此值，长执行更早压缩历史省 token；设 0 用模型默认（通常 128k） |
+| `TD_VIDEO_SPEED` | `4` | 执行录像倍速压缩倍数：落盘后立即抽帧转码（限 8fps），时长与体积同比例下降；设 0/1 关闭保留原片。ffmpeg 取系统 PATH 或 imageio-ffmpeg 自带构建，都不可用时保留原片 |
 | `TD_SHOT_DIFF` | `1` | 设为 0 关闭流程截图基线对比 |
 | `TD_SHOT_DIFF_PCT` | `2` | 截图与基线的差异阈值（百分比，超过判失败） |
 | `TD_BROWSER_ENGINE` | `chromium` | `lightpanda` 启用轻量引擎 |

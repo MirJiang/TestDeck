@@ -5,15 +5,60 @@
   url / selector / value
 check 用 contains（页面应包含文字）复用现有展示。
 """
+import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 
+from .. import config
 from .browser import launch_browser
 
 STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 STATIC_DIR.mkdir(exist_ok=True)
 
 ACTIONS = {"goto", "click", "fill", "expect_text", "screenshot", "click_xy", "drag", "ai"}
+
+_ffmpeg_missing = False   # 只提示一次
+
+
+def _ffmpeg_exe() -> str | None:
+    """ffmpeg 可执行文件：系统 PATH 优先，回退 imageio-ffmpeg 自带的静态构建。"""
+    global _ffmpeg_missing
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        if not _ffmpeg_missing:
+            _ffmpeg_missing = True
+            print("[TestDeck] 未找到 ffmpeg（可 pip install imageio-ffmpeg），执行录像保持原速原样")
+        return None
+
+
+def _accelerate_video(path: Path, speed: float) -> None:
+    """倍速压缩执行录像：setpts 压时间轴 + 限 8fps，时长与体积同比例下降。
+
+    录制本身是实时的（内核能力），这里在落盘后立即转码；AI 用例每步数秒的等待
+    会被压缩掉，长录像变成可回看的快进版。失败时保留原文件，不影响执行链路。"""
+    exe = _ffmpeg_exe()
+    if not exe or speed <= 1 or not path.exists() or path.stat().st_size == 0:
+        return
+    tmp = path.with_name(path.stem + f"-.{path.suffix}")
+    cmd = [exe, "-y", "-loglevel", "error", "-i", str(path),
+           "-vf", f"setpts=PTS/{speed},fps=8", "-c:v", "libvpx", "-b:v", "1M",
+           "-deadline", "realtime", "-cpu-used", "5", str(tmp)]
+    try:
+        subprocess.run(cmd, timeout=120, capture_output=True, check=True)
+        os.replace(tmp, path)   # 原子替换，播放路径不变
+    except Exception as e:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        print(f"[TestDeck] 录像倍速压缩失败（保留原片）：{type(e).__name__}: {e}")
 
 
 def start_run_video(page, run_id: str, tag: str = "") -> str | None:
@@ -30,15 +75,20 @@ def start_run_video(page, run_id: str, tag: str = "") -> str | None:
 
 
 def finish_run_video(page, video_url: str | None, detail: list, label: str = "") -> None:
-    """停止录制并把视频入口追加为最后一条执行明细（前端据此展示播放器）。"""
+    """停止录制，倍速压缩后把视频入口追加为最后一条执行明细（前端据此展示播放器）。"""
     if not video_url:
         return
     try:
         page.screencast.stop()   # 停止并落盘
     except Exception:
         pass
+    speed = float(config.get("TD_VIDEO_SPEED") or 4)   # 0/1 = 关闭倍速，保留原片
+    note = "执行过程录像（随截图一起定期清理）"
+    if speed > 1:
+        _accelerate_video(STATIC_DIR / video_url.rsplit("/", 1)[-1], speed)
+        note = f"执行过程录像（{speed:g}倍速压缩，随截图一起定期清理）"
     detail.append({"idx": len(detail) + 1, "action": "video", "target": label or "执行录像",
-                   "pass": True, "reason": "执行过程录像（随截图一起定期清理）",
+                   "pass": True, "reason": note,
                    "video": video_url, "ms": 0})
 
 

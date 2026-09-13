@@ -68,7 +68,7 @@ function onNlDone(steps) {
   let start = r.url
   if (base && start.startsWith(base)) start = start.slice(base.length) || '/'   // 起始页面只存路径
   editing.value = { id: '', project_id: pid.value, name: r.goal.slice(0, 24), type: 'ai', target: 'ui',
-    goal: r.goal, start_url: start, engine: '', max_steps: 30,
+    goal: r.goal, start_url: start, engine: '', max_steps: 200,
     fixedSteps: steps, username: r.username, password: r.password, source: 'ai' }
   nlRec.value = null
   toast('AI 现场执行完成，已带出用例——确认无误后点「保存用例」', 4000)
@@ -87,7 +87,7 @@ async function load() {
 
 function openNew() {
   editing.value = { id: '', project_id: pid.value, name: '', type: 'ai', target: 'ui',
-    goal: '', start_url: '', engine: '', max_steps: 30, fixedSteps: [], username: '', password: '' }
+    goal: '', start_url: '', engine: '', max_steps: 200, fixedSteps: [], username: '', password: '' }
 }
 async function openEdit(id) {
   const c = await api('/cases/' + id)

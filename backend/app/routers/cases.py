@@ -42,7 +42,7 @@ class CaseIn(BaseModel):
     target: str = "ui"         # api | ui，AI 测试的对象
     goal: str = ""
     start_url: str = ""
-    max_steps: int = 20
+    max_steps: int = 200
     engine: str = ""
     endpoints: list[dict] = []         # 引用的接口文档端点（喂给 AI 的真实接口清单）
     fixed_steps: list[dict] = []       # UI 固定步骤（录制/固化）：存在且无 goal 时回放（零 token）
@@ -109,6 +109,20 @@ def create_case(pid: str, body: CaseIn, db: Session = Depends(get_db), user: Use
                 username=body.username, password=body.password)
     db.add(c); db.commit()
     return {"id": c.id}
+
+
+@router.get("/cases/brief")
+def list_cases_brief(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """全项目用例简要清单（执行记录筛选下拉用）：按项目权限过滤，含项目名便于区分同名用例。"""
+    from ..perms import accessible_project_ids
+    from ..models import Project
+    q = db.query(TestCase)
+    if user.role != "admin":
+        q = q.filter(TestCase.project_id.in_(accessible_project_ids(user, db)))
+    rows = q.order_by(TestCase.updated_at.desc()).all()
+    pnames = {p.id: p.name for p in db.query(Project).all()}
+    return [{"id": c.id, "name": c.name, "project_id": c.project_id,
+             "project_name": pnames.get(c.project_id, "")} for c in rows]
 
 
 @router.get("/cases/{cid}")
@@ -207,7 +221,7 @@ class RecordCmdIn(BaseModel):
     # op=ai 混合录制：让 AI 在录制页面上完成一个目标
     goal: str = ""
     vars: dict = {}
-    max_steps: int = 12
+    max_steps: int = 200
 
 
 @router.post("/cases/ui-record/start")

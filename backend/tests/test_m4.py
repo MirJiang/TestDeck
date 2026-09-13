@@ -1,5 +1,7 @@
 """M4：项目权限隔离 + 通知渠道 + 报告导出。"""
 
+import time
+
 from app import config
 config.set("TD_DB", ":memory:")
 
@@ -49,6 +51,18 @@ def test_member_isolation():
     assert "P1" not in plan_names and "P2" in plan_names
 
 
+def _wait_run(client, H, rid, timeout=20):
+    """触发接口立即返回 running，轮询直到结束。"""
+    import time
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        d = client.get(f"/api/v1/runs/{rid}", headers=H).json()
+        if d.get("status") and d["status"] != "running":
+            return d
+        time.sleep(0.2)
+    raise AssertionError("执行轮询超时")
+
+
 def test_notify_and_export():
     client = make_client()
     tok = login(client, "admin", "admin123")
@@ -67,8 +81,14 @@ def test_notify_and_export():
                             "steps": [{"m": "GET", "url": "http://127.0.0.1:59998/x",
                                        "check": {"type": "status", "expect": "200"}}]}, headers=H).json()["id"]
     run = client.post(f"/api/v1/runs/cases/{cid}/run", json={"env_id": eid}, headers=H).json()
+    run = _wait_run(client, H, run["id"])
     assert run["status"] == "failed"
-    last = client.get("/api/v1/settings/notify", headers=H).json()[0]["last_status"]
+    last = ""
+    for _ in range(20):   # 通知在执行回写后异步发出，短暂轮询
+        last = client.get("/api/v1/settings/notify", headers=H).json()[0]["last_status"]
+        if last:
+            break
+        time.sleep(0.25)
     assert last  # 有推送记录（连接失败也会记录）
 
     # 报告导出
