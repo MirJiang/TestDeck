@@ -194,9 +194,11 @@ def test_ai_drive_records_warning(client, token, monkeypatch):
         mouse = None
 
         def evaluate(self, js, arg=None):
-            if arg is None:
-                return state
-            return [t for t in arg if t == "忘记密码"]
+            if arg is not None:
+                return [t for t in arg if t == "忘记密码"]
+            if js == "location.href":   # 地图比对只取 URL
+                return state["url"]
+            return state
 
         def goto(self, url, timeout=0):
             pass
@@ -217,7 +219,7 @@ def test_ai_drive_records_warning(client, token, monkeypatch):
     monkeypatch.setattr("app.ai.vision_enabled", lambda: False)
     monkeypatch.setattr("app.ai._log_usage", lambda *a, **k: None)
     script = [
-        [_tc("browser_click", think="点登录", selector="#btn")],
+        [_tc("browser_click", think="点登录", target="#btn")],
         [_tc("browser_expect_text", think="验证", value="登录成功")],
         [_tc("GenerateStructuredOutput", passed=True, reason="ok")],
     ]

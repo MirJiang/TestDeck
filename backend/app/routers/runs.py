@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/v1/runs", tags=["runs"])
 
 
 class RunIn(BaseModel):
-    env_id: str
+    env_id: str = ""   # 空则回退：计划用其绑定环境，用例/计划都可用项目唯一环境兜底
 
 
 def _new_run_id() -> str:
@@ -206,7 +206,8 @@ async def run_single(cid: str, body: RunIn, db: Session = Depends(get_db), user:
     if not c:
         raise HTTPException(404, "用例不存在")
     check_project_access(c.project_id, user, db)
-    env = db.get(Env, body.env_id)
+    env = db.get(Env, body.env_id) if body.env_id else \
+        db.query(Env).filter(Env.project_id == c.project_id).first()
     if not env:
         raise HTTPException(400, "环境不存在")
     run = _create_case_run(c, env, f"user:{user.username}")
@@ -222,7 +223,9 @@ async def run_plan(pid: str, body: RunIn, db: Session = Depends(get_db), user: U
     if not plan:
         raise HTTPException(404, "计划不存在")
     check_project_access(plan.project_id, user, db)
-    env = db.get(Env, body.env_id or plan.env_id)
+    env = db.get(Env, body.env_id) if body.env_id else (
+        db.get(Env, plan.env_id) if getattr(plan, "env_id", "") else
+        db.query(Env).filter(Env.project_id == plan.project_id).first())
     if not env:
         raise HTTPException(400, "环境不存在")
     loop = asyncio.get_running_loop()

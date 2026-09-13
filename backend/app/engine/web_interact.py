@@ -72,7 +72,9 @@ const __sel = el => {
   const text = (el.innerText || '').trim().replace(/\\s+/g, ' ');
   if (text && text.length <= 24)
     return 'text="' + text.replace(/"/g, '') + '"';
-  const peers = [...document.querySelectorAll(tag)].filter(e => __vis(e));
+  // 同标签序号按已渲染（有盒）的同类元素计数：屏外元素也能拿到有效 nth
+  //（点击/填写时浏览器自动滚过去）；display:none 无盒自动排除
+  const peers = [...document.querySelectorAll(tag)].filter(e => e.getClientRects().length > 0);
   return tag + ' >> nth=' + peers.indexOf(el);
 };
 """

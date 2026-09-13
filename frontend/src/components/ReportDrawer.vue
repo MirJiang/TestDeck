@@ -1,12 +1,19 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api, getToken } from '../api'
 
 const props = defineProps({ runId: String })
 const emit = defineEmits(['close'])
 const run = ref(null)
 
-onMounted(async () => { run.value = await api('/runs/' + props.runId) })
+// 截图点击放大（灯箱）：点遮罩或 Esc 关闭
+const zoom = ref('')
+const onKey = (e) => { if (e.key === 'Escape') zoom.value = '' }
+onMounted(async () => {
+  run.value = await api('/runs/' + props.runId)
+  window.addEventListener('keydown', onKey)
+})
+onUnmounted(() => window.removeEventListener('keydown', onKey))
 
 const stepsOf = (d) => Array.isArray(d) && d.length && 'idx' in d[0]
 
@@ -80,11 +87,13 @@ async function exportHtml() {
                 <span v-if="a.warning" style="font-size:11.5px;color:var(--warn,#b8860b)" :title="a.warning">⚠ {{ a.warning }}</span>
               </div>
             </div>
-            <img v-if="s.screenshot" :src="s.screenshot" loading="lazy" style="max-width:100%;border:1px solid var(--line);border-radius:6px;margin-top:8px">
+            <img v-if="s.screenshot" :src="s.screenshot" loading="lazy" @click="zoom = s.screenshot"
+                 title="点击放大" style="max-width:100%;border:1px solid var(--line);border-radius:6px;margin-top:8px;cursor:zoom-in">
             <video v-if="s.video" :src="s.video" controls style="max-width:100%;border:1px solid var(--line);border-radius:6px;margin-top:8px"></video>
             <div v-if="s.diff" style="margin-top:8px">
               <div class="muted" style="font-size:12px;margin-bottom:4px">基线（左）与本次（右）对比：</div>
-              <img :src="s.diff" loading="lazy" style="max-width:100%;border:1px solid var(--err);border-radius:6px">
+              <img :src="s.diff" loading="lazy" @click="zoom = s.diff" title="点击放大"
+                   style="max-width:100%;border:1px solid var(--err);border-radius:6px;cursor:zoom-in">
             </div>
           </div>
         </template>
@@ -102,6 +111,11 @@ async function exportHtml() {
           </tbody>
         </table>
       </template>
+    </div>
+    <div v-if="zoom" @click="zoom = ''"
+         style="position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.78);display:flex;align-items:center;justify-content:center;cursor:zoom-out"
+         title="点击任意处或按 Esc 关闭">
+      <img :src="zoom" style="max-width:94vw;max-height:94vh;border-radius:6px;box-shadow:0 8px 40px rgba(0,0,0,.5)">
     </div>
   </div>
 </template>

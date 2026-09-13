@@ -58,6 +58,11 @@ class CaseImportIn(BaseModel):
     text: str
 
 
+class AccountIn(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
 def _steps_for_store(body: CaseIn) -> list[dict]:
     if body.type == "ai":
         return [{"target": (body.target or "ui").strip().lower(),
@@ -134,6 +139,18 @@ def get_case(cid: str, db: Session = Depends(get_db), user: User = Depends(curre
     return {"id": c.id, "project_id": c.project_id, "name": c.name, "type": c.type,
             "steps": c.steps, "source": c.source, "updated_at": c.updated_at.isoformat(),
             "username": getattr(c, "username", "") or "", "password": getattr(c, "password", "") or ""}
+
+
+@router.put("/cases/{cid}/account")
+def update_case_account(cid: str, body: AccountIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """只改绑定的测试账号（执行时注入 ${username}/${password}），不触碰用例其余配置。"""
+    c = db.get(TestCase, cid)
+    if not c:
+        raise HTTPException(404, "用例不存在")
+    check_project_access(c.project_id, user, db)
+    c.username, c.password = body.username.strip(), body.password
+    db.commit()
+    return {"ok": True}
 
 
 @router.put("/cases/{cid}")

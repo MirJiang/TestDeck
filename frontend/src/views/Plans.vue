@@ -149,6 +149,6 @@ function run(pl) {
     </div>
   </div>
 
-  <RunDrawer v-if="running" :title="running.title" :planId="running.planId" :envs="running.envs"
+  <RunDrawer v-if="running" :title="running.title" :planId="running.planId"
     @close="running = null" @done="load" />
 </template>

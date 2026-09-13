@@ -1,18 +1,43 @@
 <script setup>
-import { ref, computed, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '../api'
 import { toast, alertDialog } from '../dialog'
 
-const props = defineProps({ title: String, caseId: String, caseType: String, planId: String, envs: Array })
+const props = defineProps({ title: String, caseId: String, caseType: String, planId: String })
 const emit = defineEmits(['close', 'done'])
 
-const envId = ref(props.envs[0]?.id || '')
 const running = ref(false)
 const result = ref(null)
 const err = ref('')
 const aiTips = ref(null)
 const aiLoading = ref(false)
 const solidifying = ref(false)
+
+// 绑定的测试账号（单用例执行时显示/可切换）：项目用户池里选一个，写入用例
+const acct = ref({ username: '' })          // 用例当前绑定
+const pool = ref([])                        // 项目测试用户池
+const acctSel = ref('')                     // 选中的池用户 id
+const customAcct = computed(() => acct.value.username && !pool.value.some(u => u.username === acct.value.username))
+const acctBusy = ref(false)
+onMounted(async () => {
+  if (!props.caseId) return
+  try {
+    acct.value = await api('/cases/' + props.caseId)
+    pool.value = await api('/projects/' + acct.value.project_id + '/users').catch(() => [])
+    const hit = pool.value.find(u => u.username === acct.value.username)
+    acctSel.value = hit ? hit.id : (acct.value.username ? '__custom' : '')
+  } catch { /* 展示失败不阻塞执行 */ }
+})
+async function changeAcct() {
+  const u = pool.value.find(x => x.id === acctSel.value)
+  if (!u) return
+  acctBusy.value = true
+  try {
+    await api(`/cases/${props.caseId}/account`, { method: 'PUT', body: { username: u.username, password: u.password } })
+    acct.value.username = u.username
+    toast(`已切换测试账号：${u.username}`)
+  } catch (e) { err.value = e.message } finally { acctBusy.value = false }
+}
 
 async function analyze() {
   aiLoading.value = true; aiTips.value = null
@@ -37,7 +62,7 @@ async function solidify() {
       body.goal = ''
       body.fixed_api_steps = steps
     } else {
-      const steps = acts.filter(s => ['goto', 'click', 'fill', 'expect_text', 'screenshot'].includes(s.action))
+      const steps = acts.filter(s => ['goto', 'click', 'dblclick', 'fill', 'expect_text', 'screenshot'].includes(s.action))
         .map(s => ({ action: s.action, url: s.url || '', selector: s.selector || '', value: s.value || '' }))
       if (!steps.length) { await alertDialog('本次执行没有可固化的页面操作', '无法固化'); return }
       body.target = 'ui'
@@ -58,8 +83,9 @@ async function run() {
   running.value = true; result.value = null; err.value = ''
   const path = props.caseId ? `/runs/cases/${props.caseId}/run` : `/runs/plans/${props.planId}/run`
   try {
-    // 触发接口立即返回 running 记录（执行在后台继续），轮询直到结束
-    result.value = await api(path, { method: 'POST', body: { env_id: envId.value } })
+    // 触发接口立即返回 running 记录（执行在后台继续），轮询直到结束；
+    // 环境不传：后端用项目唯一环境兜底（计划用其绑定环境）
+    result.value = await api(path, { method: 'POST', body: {} })
     emit('done')
     if (result.value.status === 'running') {
       curRunId = result.value.id
@@ -111,10 +137,17 @@ function toggleItem(i) { expandedItem.value = expandedItem.value === i ? -1 : i 
     <div class="dh"><h3>执行 · {{ title }}</h3><button class="x" @click="emit('close')">✕</button></div>
     <div class="db">
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
-        <span class="muted">环境</span>
-        <select v-model="envId"><option v-if="!envs.length" value="" disabled>暂无环境，可在项目页添加</option><option v-for="e in envs" :key="e.id" :value="e.id">{{ e.name }}</option></select>
+        <template v-if="caseId">
+          <span class="muted">账号</span>
+          <select v-model="acctSel" :disabled="acctBusy" @change="changeAcct" title="执行时注入 ${username}/${password}">
+            <option v-if="!pool.length && !acct.username" value="" disabled>未绑定账号（可在项目页用户池添加）</option>
+            <option v-if="customAcct" value="__custom" disabled>{{ acct.username }}（当前绑定）</option>
+            <option v-for="u in pool" :key="u.id" :value="u.id">{{ (u.name ? u.name + ' · ' : '') + u.username }}</option>
+          </select>
+        </template>
+        <span v-else class="muted">按计划配置执行</span>
         <button v-if="running" class="btn" style="margin-left:auto" @click="cancel">取消执行</button>
-        <button v-else class="btn pri" style="margin-left:auto" :disabled="!envId" @click="run">
+        <button v-else class="btn pri" style="margin-left:auto" @click="run">
           {{ result ? '再次执行' : '立即执行' }}</button>
       </div>
       <div v-if="err" style="color:var(--err)">{{ err }}</div>

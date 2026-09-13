@@ -173,7 +173,7 @@ const filtered = () => list.value.filter(c => c.name.includes(q.value.trim()))
   </div>
 
   <CaseEditor v-if="editing" v-model="editing" @save="save" @close="editing = null" />
-  <RunDrawer v-if="running" :title="running.title" :caseId="running.caseId" :caseType="running.caseType" :envs="envs"
+  <RunDrawer v-if="running" :title="running.title" :caseId="running.caseId" :caseType="running.caseType"
     @close="running = null" @done="load" />
   <!-- 存量资产导入：HAR / Postman Collection -->
   <div class="mask" :class="{ on: impOpen }" @click.self="impOpen = false">

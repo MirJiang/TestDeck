@@ -44,6 +44,9 @@ class FakeMouse:
     def up(self):
         self.page._rec("mouse_up")
 
+    def wheel(self, dx, dy):
+        self.page._rec("mouse_wheel", dx, dy)
+
 
 class FakePage:
     def __init__(self, state=None, body="登录成功", fail_selectors=(), shot=b"shot"):
@@ -68,8 +71,13 @@ class FakePage:
     def goto(self, url, timeout=0, wait_until=None):
         self._rec("goto", url)
 
-    def click(self, sel, timeout=0):
+    def click(self, sel, timeout=0, force=False):
         self._rec("click", sel)
+        if sel in self.fail_selectors:
+            raise TimeoutError(f"Timeout 8000ms exceeded. waiting for {sel}")
+
+    def dblclick(self, sel, timeout=0, force=False):
+        self._rec("dblclick", sel)
         if sel in self.fail_selectors:
             raise TimeoutError(f"Timeout 8000ms exceeded. waiting for {sel}")
 
@@ -131,8 +139,8 @@ def _tc(tool_name, **inp):
 def _login_script():
     """每次新建（ToolCallBlock 会被 agent 更新 state，跨测试复用会被当成已执行）。"""
     return [
-        [_tc("browser_fill", think="填账号", selector="#u", value="${username}")],
-        [_tc("browser_click", think="点登录", selector="#btn")],
+        [_tc("browser_fill", think="填账号", target="#u", value="${username}")],
+        [_tc("browser_click", think="点登录", target="#btn")],
         [_tc("browser_expect_text", think="验证", value="登录成功")],
         [_tc("GenerateStructuredOutput", passed=True, reason="登录成功")],
     ]
@@ -167,6 +175,61 @@ def test_bridge_end_to_end(stub_llm, monkeypatch):
     assert seen == [1, 2, 3, 4]                         # on_step 流式回调
     assert r["detail"][0]["think"] == "填账号"           # think 回填
     assert r["detail"][-1]["screenshot"]                # done 留证截图
+
+
+def test_bridge_click_xy_many(stub_llm, monkeypatch):
+    """批量坐标点击：一次调用逐点执行，明细仍是原子 click_xy。"""
+    monkeypatch.setattr(B, "build_model_chain", lambda on_usage=None: _stub_model_factory([
+        [_tc("browser_click_xy_many", think="点验证码",
+             points=[[627, 283], [733, 221], [561, 222]])],
+        [_tc("GenerateStructuredOutput", passed=True, reason="已点完")],
+    ]))
+    page = FakePage()
+    r = run_brain(page, "点选验证码", {}, max_steps=5)
+    assert r["status"] == "passed"
+    assert ("mouse_click", 627, 283) in page.calls and ("mouse_click", 561, 222) in page.calls
+    assert [d["action"] for d in r["detail"]] == ["click_xy", "click_xy", "click_xy", "done"]
+
+
+def test_bridge_scroll(stub_llm, monkeypatch):
+    """滚动动作：dy 经 _exec_action 传给鼠标滚轮（负值向上）。"""
+    monkeypatch.setattr(B, "build_model_chain", lambda on_usage=None: _stub_model_factory([
+        [_tc("browser_scroll", think="向下找涉及线路", dy=800)],
+        [_tc("GenerateStructuredOutput", passed=True, reason="已滚动")],
+    ]))
+    page = FakePage()
+    r = run_brain(page, "查看下方区块", {}, max_steps=5)
+    assert r["status"] == "passed"
+    assert ("mouse_wheel", 0, 800) in page.calls
+
+
+def test_bridge_dblclick(stub_llm, monkeypatch):
+    """双击动作：句柄解析 + 原子 dblclick 明细（选行类弹窗的补能力）。"""
+    monkeypatch.setattr(B, "build_model_chain", lambda on_usage=None: _stub_model_factory([
+        [_tc("browser_goto", think="打开页面", url="/")],
+        [_tc("browser_dblclick", think="双击选行", target="b2")],
+        [_tc("GenerateStructuredOutput", passed=True, reason="已选中")],
+    ]))
+    page = FakePage()
+    r = run_brain(page, "选择公司", {}, max_steps=5)
+    assert r["status"] == "passed"
+    assert ("dblclick", "#btn") in page.calls
+    assert [d["action"] for d in r["detail"]] == ["goto", "dblclick", "done"]
+
+
+def test_bridge_handle_and_fill_many(stub_llm, monkeypatch):
+    """句柄寻址：动作里的句柄翻译回注册时的 selector；fill_many 批量执行、每字段一条原子 fill 明细。"""
+    monkeypatch.setattr(B, "build_model_chain", lambda on_usage=None: _stub_model_factory([
+        [_tc("browser_goto", think="打开页面", url="/")],   # 首个状态回包注册句柄 b1=#u, b2=#btn
+        [_tc("browser_fill_many", think="批量填", fields=[
+            {"target": "b1", "value": "u1"}, {"target": "b2", "value": "p1"}])],
+        [_tc("GenerateStructuredOutput", passed=True, reason="已填完")],
+    ]))
+    page = FakePage()
+    r = run_brain(page, "填表单", {}, max_steps=5)
+    assert r["status"] == "passed"
+    assert ("fill", "#u", "u1") in page.calls and ("fill", "#btn", "p1") in page.calls
+    assert [d["action"] for d in r["detail"]] == ["goto", "fill", "fill", "done"]   # 明细仍是原子 fill
 
 
 def test_bridge_save_and_variables(stub_llm, monkeypatch):
@@ -207,7 +270,7 @@ def test_bridge_llm_not_configured(monkeypatch):
 def test_bridge_circuit_breaker(stub_llm, monkeypatch):
     """断路器：同一动作+selector 连续失败 3 次 → INTERRUPTED 终止 reply。"""
     monkeypatch.setattr(B, "build_model_chain", lambda on_usage=None: _stub_model_factory(
-        [[_tc("browser_fill", think="填", selector="#u", value="x")] for _ in range(10)]))
+        [[_tc("browser_fill", think="填", target="#u", value="x")] for _ in range(10)]))
     page = FakePage(fail_selectors=("#u",))
     r = run_brain(page, "填表单", {}, max_steps=10)
     assert r["status"] == "failed"
@@ -220,7 +283,7 @@ def test_bridge_cancel(stub_llm, monkeypatch):
     """取消：queue registry 标记取消后，下一个工具执行点终止。"""
     from app.engine import queue as _q
     monkeypatch.setattr(B, "build_model_chain", lambda on_usage=None: _stub_model_factory(
-        [[_tc("browser_click", think="点", selector="#btn")] for _ in range(10)]))
+        [[_tc("browser_click", think="点", target="#btn")] for _ in range(10)]))
     _q.register("cancel-run")
     page = FakePage()
     orig_execute = Harness.execute
@@ -239,7 +302,7 @@ def test_bridge_cancel(stub_llm, monkeypatch):
 
 def test_bridge_max_steps(stub_llm, monkeypatch):
     monkeypatch.setattr(B, "build_model_chain", lambda on_usage=None: _stub_model_factory(
-        [[_tc("browser_click", think="点", selector="#btn")] for _ in range(30)]))
+        [[_tc("browser_click", think="点", target="#btn")] for _ in range(30)]))
     page = FakePage()
     r = run_brain(page, "无限点击", {}, max_steps=4)
     assert r["status"] == "failed" and "最大步数" in r["detail"][-1]["reason"]

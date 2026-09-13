@@ -17,7 +17,7 @@ from .browser import launch_browser
 STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
 STATIC_DIR.mkdir(exist_ok=True)
 
-ACTIONS = {"goto", "click", "fill", "expect_text", "screenshot", "click_xy", "drag", "ai"}
+ACTIONS = {"goto", "click", "dblclick", "fill", "expect_text", "screenshot", "click_xy", "drag", "scroll", "ai"}
 
 _ffmpeg_missing = False   # 只提示一次
 
@@ -127,6 +127,9 @@ def _sync_run(case, env, run_id: str, engine: str | None = None) -> dict:
                 elif action == "click":
                     page.click(sel, timeout=8000)
                     res.update(**{"pass": True, "reason": f"点击 {sel}"})
+                elif action == "dblclick":
+                    page.dblclick(sel, timeout=8000)
+                    res.update(**{"pass": True, "reason": f"双击 {sel}"})
                 elif action == "fill":
                     page.fill(sel, val, timeout=8000)
                     res.update(**{"pass": True, "reason": f"在 {sel} 输入 {val}"})
@@ -153,6 +156,13 @@ def _sync_run(case, env, run_id: str, engine: str | None = None) -> dict:
                     x, y = _px(step, page, "x", "width"), _px(step, page, "y", "height")
                     page.mouse.click(x, y)
                     res.update(**{"pass": True, "reason": f"点击坐标 ({x},{y})"})
+                elif action == "scroll":  # 滚轮滚动：dy>0 向下，不依赖滚动条位置
+                    dy = max(-2000, min(2000, int(step.get("dy", 600) or 600)))
+                    try:
+                        page.mouse.wheel(0, dy)
+                    except Exception:
+                        page.evaluate(f"window.scrollBy(0, {dy})")
+                    res.update(**{"pass": True, "reason": f"滚动页面 {dy}px"})
                 elif action == "drag":  # 滑块：按住起点分步拖到终点，模拟人手轨迹
                     x1, y1 = _px(step, page, "x", "width"), _px(step, page, "y", "height")
                     x2, y2 = _px(step, page, "x2", "width"), _px(step, page, "y2", "height")

@@ -576,3 +576,19 @@ def app_map_brief(project_id: str, max_pages: int = 20) -> str:
         return "\n".join(out)[:3000]
     finally:
         db.close()
+
+
+def map_page_keys(project_id: str, max_pages: int = 60) -> set:
+    """项目地图已收录的页面标识集合（key = _page_key 的产物）。
+
+    给 AI 执行时判定"当前页是否地图已知页"用：已知页的页面文字与地图/元素清单
+    高度重复，状态回包可省略以省 token。
+    """
+    if not project_id:
+        return set()
+    db = SessionLocal()
+    try:
+        return {r[0] for r in db.query(AppPage.path).filter(
+            AppPage.project_id == project_id).limit(max_pages) if r[0]}
+    finally:
+        db.close()

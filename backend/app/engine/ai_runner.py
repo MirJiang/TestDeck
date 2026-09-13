@@ -27,26 +27,64 @@ DEFAULT_MAX_STEPS = 200
 # 提取页面状态：通用可交互元素清单（判定标准见 web_interact.HELPERS_JS，无站点特定规则）。
 # 选择器优先级：id > data-testid/name > placeholder/type > aria-label > 精确文本 > 同标签序号。
 # checkbox/radio/file 不进清单（模型用不上、费 token）；无名可点元素（纯图标无 aria-label）也不进。
+# 弹窗优先：可见 dialog 的内容单独提取（配额 40）——弹窗是当前交互焦点，且其 DOM 追加在
+# body 末尾，顺序遍历必被主页面挤出上限（实测选行弹窗会被整块截掉，AI 只能对着截图盲点）；
+# 弹窗内零交互信号的表格行降级收录为可点条目（弹窗里的行几乎必然响应点击/双击，如双击选行）。
+# 主页面配额 80（管理后台的菜单/页签 chrome 很重，40 会截掉长表单尾部的字段）。
 _STATE_JS = "() => {" + HELPERS_JS + """
-  const out = [];
+  // 屏外已渲染元素也算可见（下方表单区块）：点击/填写句柄时浏览器会自动滚过去；
+  // 只保留尺寸/样式/aria-hidden 判定，放开 __vis 的视口边界
+  const __rendered = el => {
+    const r = el.getBoundingClientRect();
+    if (r.width <= 2 || r.height <= 2 || r.right <= 0 || r.left >= innerWidth) return false;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || +cs.opacity < 0.1) return false;
+    return el.getAttribute('aria-hidden') !== 'true';
+  };
   const seen = new Set();
-  for (const el of document.querySelectorAll('body *')) {
-    if (out.length >= 60) break;
+  const selCount = new Map();   // 同名选择器计数：第二个「添加」等同文案元素也能领到唯一句柄
+  const grab = (el, allowRow) => {
     const tag = el.tagName;
     const type = (el.type || '').toLowerCase();
-    if (tag === 'INPUT' && ['checkbox', 'radio', 'file'].includes(type)) continue;
-    if (!__vis(el) || !__inter(el)) continue;
+    if (tag === 'INPUT' && ['checkbox', 'radio', 'file'].includes(type)) return null;
+    if (!__rendered(el)) return null;
+    let row = false;
+    if (!__inter(el)) {
+      if (!(allowRow && (tag === 'TR' || (el.getAttribute('role') || '').toLowerCase() === 'row')
+            && (el.innerText || '').trim())) return null;
+      row = true;
+    }
     const label = __label(el);
-    if (!label && !['INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) continue;
-    if (label.length > 80) continue;   // 长文本 = 容器，不是单个可点元素
-    const sel = __sel(el);
-    if (seen.has(sel)) continue;
+    if (!label && !['INPUT', 'SELECT', 'TEXTAREA'].includes(tag)) return null;
+    if (label.length > 80) return null;   // 长文本 = 容器，不是单个可点元素
+    const clean = row ? label.replace(/[ \\t\\n]+/g, ' ').trim() : label;
+    let sel = __sel(el);
+    const c = selCount.get(sel) || 0;
+    selCount.set(sel, c + 1);
+    if (c > 0) sel = sel + ' >> nth=' + c;   // Playwright 原生支持：第 c 个匹配
+    if (seen.has(sel)) return null;
     seen.add(sel);
-    out.push({ selector: sel, tag: tag.toLowerCase(), text: label.slice(0, 24),
-               value: String(el.value || '').slice(0, 40) });
+    return { selector: sel, tag: row ? 'row' : tag.toLowerCase(), text: clean.slice(0, 24),
+             value: String(el.value || '').slice(0, 40) };
+  };
+  const DLG_SEL = '.el-dialog__wrapper, .el-drawer__wrapper, [role="dialog"], dialog';
+  const inDlg = [];
+  for (const d of [...document.querySelectorAll(DLG_SEL)].filter(x => x.getClientRects().length)) {
+    for (const el of d.querySelectorAll('*')) {
+      if (inDlg.length >= 40) break;
+      const it = grab(el, true);
+      if (it) inDlg.push(it);
+    }
+  }
+  const out = [];
+  for (const el of document.querySelectorAll('body *')) {
+    if (out.length >= 80) break;
+    if (el.closest(DLG_SEL)) continue;   // 弹窗内已单独提取
+    const it = grab(el, false);
+    if (it) out.push(it);
   }
   return { url: location.href, title: String(document.title || '').slice(0, 60),
-           elements: out, vw: innerWidth, vh: innerHeight,
+           elements: [...inDlg, ...out], vw: innerWidth, vh: innerHeight,
            text: String(document.body.innerText || '').replace(/[ \\t\\n]+/g, ' ').slice(0, 700) };
 }"""
 
@@ -317,15 +355,44 @@ def _exec_action(page, act: dict, variables: dict):
         return True, f"打开 {target}", None
     if op == "click":
         loc = _loc_visible_first(page, sel)
-        if loc is None:
-            page.click(sel, timeout=8000)
-        else:
-            loc.click(timeout=8000)
+        try:
+            if loc is None:
+                page.click(sel, timeout=5000)
+            else:
+                loc.click(timeout=5000)
+        except Exception:
+            # 常规点击超时多为遮罩/动画/未进视口；强制再点一次（绕过可点性检查），
+            # 仍失败才抛给上层记失败——省掉模型"看截图改坐标"的两步回退
+            if loc is None:
+                page.click(sel, timeout=5000, force=True)
+            else:
+                loc.click(timeout=5000, force=True)
         return True, f"点击 {sel}", None
+    if op == "dblclick":
+        loc = _loc_visible_first(page, sel)
+        try:
+            if loc is None:
+                page.dblclick(sel, timeout=5000)
+            else:
+                loc.dblclick(timeout=5000)
+        except Exception:
+            # 与 click 同策略：超时多为遮罩/动画，强制再试一次
+            if loc is None:
+                page.dblclick(sel, timeout=5000, force=True)
+            else:
+                loc.dblclick(timeout=5000, force=True)
+        return True, f"双击 {sel}", None
     if op == "click_xy":  # 点选验证码：按截图坐标点击
         x, y = int(act.get("x", 0)), int(act.get("y", 0))
         page.mouse.click(x, y)
         return True, f"点击坐标 ({x},{y})", None
+    if op == "scroll":
+        dy = max(-2000, min(2000, int(act.get("dy", 600) or 600)))
+        try:
+            page.mouse.wheel(0, dy)          # 滚轮：不依赖滚动条位置
+        except Exception:                    # 引擎不支持滚轮时退回 window.scrollBy
+            page.evaluate(f"window.scrollBy(0, {dy})")
+        return True, f"滚动页面{'向下' if dy > 0 else '向上'} {abs(dy)}px", None
     if op == "drag":  # 滑块验证码：按住起点分步拖到终点，模拟人手轨迹
         x1, y1 = int(act.get("x", 0)), int(act.get("y", 0))
         x2, y2 = int(act.get("x2", 0)), int(act.get("y2", 0))
@@ -377,7 +444,7 @@ def _model_hint() -> str:
 
 def ai_drive(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEPS,
              run_id: str = "", shot_tag: str = "ai", on_step=None, engine: str = "",
-             page_map: str = "", project_id: str = "") -> dict:
+             page_map: str = "", project_id: str = "", map_keys: set | None = None) -> dict:
     """同步驱动（B4 起唯一路径）：委托 AgentScope ReAct agent（brain_agentscope.run_brain）。
     返回 {status, pass_n, fail_n, detail, saved, summary}，须在执行队列线程调用。
 
@@ -390,7 +457,7 @@ def ai_drive(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEP
     with A.run_context(run_id):   # 本执行的 LLM 调用都归属到 llm_logs.run_id
         r = run_brain(page, goal, variables, max_steps=max_steps, run_id=run_id,
                       shot_tag=shot_tag, on_step=on_step, engine=engine,
-                      page_map=page_map, project_id=project_id)
+                      page_map=page_map, project_id=project_id, map_keys=map_keys)
     r.pop("brain", None)     # 内部标注不进执行明细契约
     r.pop("usage", None)     # 用量已经 on_usage 实时写入 llm_logs
     return r
@@ -465,11 +532,13 @@ def run_ai_case(case, env, run_id: str, on_step=None) -> dict:
                 on_step([dict(note_entry)])
         else:
             detail = []
-        from .app_mapper import app_map_brief
+        from .app_mapper import app_map_brief, map_page_keys
+        pid = getattr(case, "project_id", "") or ""
         r = ai_drive(page, goal, variables, max_steps=max_steps, run_id=run_id,
                      on_step=on_step, engine=used,
-                     page_map=app_map_brief(getattr(case, "project_id", "")),
-                     project_id=getattr(case, "project_id", "") or "")
+                     page_map=app_map_brief(pid),
+                     project_id=pid,
+                     map_keys=map_page_keys(pid) if pid else set())
         if detail:  # 把 note 并进结果明细头部（idx 保持 ai_drive 的编号可读性）
             r["detail"] = detail + r["detail"]
             r["pass_n"] += 1
