@@ -47,6 +47,9 @@ class CaseIn(BaseModel):
     endpoints: list[dict] = []         # 引用的接口文档端点（喂给 AI 的真实接口清单）
     fixed_steps: list[dict] = []       # UI 固定步骤（录制/固化）：存在且无 goal 时回放（零 token）
     fixed_api_steps: list[dict] = []   # API 固定请求（固化）：存在且无 goal 时回放（零 token）
+    # 测试设计先行：测试点清单（每点 {name, intent, asserts:[{type,...}]}）——
+    # 断言由引擎执行（客观判定），AI 只负责到达可验证状态；执行前由人确认，是可评审的用例资产
+    test_points: list[dict] = []
     # 绑定的测试账号（从项目用户列表带出，可改）：执行时注入 ${username}/${password}
     username: str = ""
     password: str = ""
@@ -71,8 +74,27 @@ def _steps_for_store(body: CaseIn) -> list[dict]:
                  "engine": (body.engine or "").strip().lower(),
                  "endpoints": body.endpoints or [],
                  "fixed_steps": body.fixed_steps or [],
-                 "fixed_api_steps": body.fixed_api_steps or []}]
+                 "fixed_api_steps": body.fixed_api_steps or [],
+                 "test_points": _validated_points(body.test_points)}]
     return [s.model_dump() for s in body.steps]
+
+
+def _validated_points(points: list[dict]) -> list[dict]:
+    """测试点入参校验：断言类型必须可执行（引擎判定不接受自由文本）。"""
+    from ..engine.assertions import ASSERT_TYPES
+    out = []
+    for i, p in enumerate(points or []):
+        if not isinstance(p, dict):
+            raise HTTPException(400, f"测试点 {i + 1} 格式不合法")
+        asserts = p.get("asserts") or []
+        for a in asserts:
+            if not isinstance(a, dict) or a.get("type") not in ASSERT_TYPES:
+                raise HTTPException(400, f"测试点「{p.get('name', i + 1)}」含未知断言类型："
+                                        f"{(a or {}).get('type')}（可用：{'/'.join(ASSERT_TYPES)}）")
+        out.append({"name": str(p.get("name") or f"测试点{i + 1}").strip()[:100],
+                    "intent": str(p.get("intent") or "")[:500],
+                    "asserts": asserts})
+    return out
 
 
 def validate_steps(steps, case_type="api"):
@@ -241,24 +263,37 @@ class RecordCmdIn(BaseModel):
     max_steps: int = 200
 
 
+class SteerIn(BaseModel):
+    text: str   # 插话内容：注入下一次工具结果，AI 在下一个决策点改道
+
+
 @router.post("/cases/ui-record/start")
 def ui_record_start(url: str = Query(...), mode: str = Query("remote"), user: User = Depends(current_user)):
     if not url.startswith("http"):
         raise HTTPException(400, "请提供完整地址（http(s)://…）")
     from ..engine import ui_recorder
-    import time as _t
-    sid = f"rec-{int(_t.time() * 1000) % 10**9}"
+    import secrets as _secrets
+    sid = f"rec-{_secrets.token_hex(6)}"   # 随机 sid：时间戳可预测会被他人爆破劫持录制会话
     try:
-        ui_recorder.start_recording(sid, url, mode=mode)
+        ui_recorder.start_recording(sid, url, mode=mode, owner_id=user.id)
     except RuntimeError as e:
         raise HTTPException(429, str(e))
     return {"session": sid, "mode": "local" if mode == "local" else "remote"}
+
+
+def _own_recording(sid: str, user: User):
+    """录制会话属主校验：存在但非属主一律 404（不泄露会话是否存在）；
+    会话不存在时放行到下游（get_frame/compile_steps 等各自返回既有的友好错误）。"""
+    from ..engine.ui_recorder import session_exists, session_owned_by
+    if session_exists(sid) and not session_owned_by(sid, user):
+        raise HTTPException(404, "录制会话不存在")
 
 
 @router.get("/cases/ui-record/{sid}/frame")
 def ui_record_frame(sid: str, user: User = Depends(current_user)):
     """录制画面帧（JPEG），前端轮询拼出实时画面。"""
     from ..engine.ui_recorder import get_frame
+    _own_recording(sid, user)
     data = get_frame(sid)
     if data is None:
         raise HTTPException(404, "录制会话不存在")
@@ -282,6 +317,10 @@ async def ui_record_stream(ws: WebSocket, sid: str):
     if user is None:
         await ws.close(code=4401)
         return
+    from ..engine.ui_recorder import session_owned_by
+    if not session_owned_by(sid, user):   # WS 无法带 Depends，这里手动做属主校验
+        await ws.close(code=4403)
+        return
     await ws.accept()
     from ..engine.ui_recorder import stream_frames
     try:
@@ -303,6 +342,7 @@ async def ui_record_stream(ws: WebSocket, sid: str):
 def ui_record_cmd(sid: str, body: RecordCmdIn, user: User = Depends(current_user)):
     """在录制中的页面上执行一条用户指令（点击/输入/跳转/AI 代劳/滚动/完成）。"""
     from ..engine.ui_recorder import send_cmd, start_ai_cmd
+    _own_recording(sid, user)
     if body.op == "ai":   # AI 代劳入队即返回，进度经会话状态轮询（可能跑很久且可取消）
         return start_ai_cmd(sid, body.model_dump())
     return send_cmd(sid, body.model_dump(), timeout=35.0)
@@ -312,10 +352,20 @@ def ui_record_cmd(sid: str, body: RecordCmdIn, user: User = Depends(current_user
 def ui_record_cancel_ai(sid: str, user: User = Depends(current_user)):
     """中止当前 AI 代劳轮（录制线程在步骤间检查取消标记后退出）。"""
     from ..engine.ui_recorder import cancel_ai
+    _own_recording(sid, user)
     return cancel_ai(sid)
+
+
+@router.post("/cases/ui-record/{sid}/steer-ai")
+def ui_record_steer_ai(sid: str, body: SteerIn, user: User = Depends(current_user)):
+    """向正在执行的 AI 代劳插话：不打断当前动作，指示在下一次工具结果里注入。"""
+    from ..engine.ui_recorder import steer_ai
+    _own_recording(sid, user)
+    return steer_ai(sid, body.text)
 
 
 @router.get("/cases/ui-record/{sid}")
 def ui_record_poll(sid: str, user: User = Depends(current_user)):
     from ..engine.ui_recorder import compile_steps
+    _own_recording(sid, user)
     return compile_steps(sid)

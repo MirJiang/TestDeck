@@ -4,7 +4,8 @@
 TD_WORKERS=N 开启并发执行——SQLite 已配 busy_timeout，多 worker 下写等待
 自动重试而非立刻报 "database is locked"（生产切 PostgreSQL/MySQL 更稳）。
 
-支持取消：执行前注册一个 cancel token，取消接口置位后，引擎在步骤间检查并提前终止。
+支持取消：取消接口把 run_id 置入集合，引擎在步骤间检查并提前终止；执行体开跑时
+还会做一次"排队期间已被取消"的早退检查（cancel 可以发生在任务还在排队时）。
 """
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -28,7 +29,12 @@ def worker_count() -> int:
 
 
 def register(run_id: str) -> None:
-    _cancelled.discard(run_id)
+    """保留兼容的空操作：取消标记只在执行结束（unregister）时清除。
+
+    曾经在这里 discard，会把"任务还在排队时"发起的取消吞掉——任务开跑后标记
+    凭空消失、完整执行。run_id 已改为随机生成，不存在撞上陈旧标记的问题。
+    """
+    return None
 
 
 def cancel(run_id: str) -> None:

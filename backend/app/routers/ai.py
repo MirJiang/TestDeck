@@ -3,8 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from ..db import get_db
-from ..models import User, Project, TestCase, TestRun, GitRepo, CommitSync
+from ..models import User, TestCase, TestRun, GitRepo, CommitSync
 from ..auth import current_user
+from ..perms import check_project_access
 from .. import ai as A
 import json
 
@@ -73,6 +74,7 @@ async def gen_from_commits(body: CommitsIn, db: Session = Depends(get_db), user:
     repo = db.get(GitRepo, body.repo_id)
     if not repo:
         raise HTTPException(404, "仓库不存在")
+    check_project_access(repo.project_id, user, db)   # 仓库所属项目的权限校验
     q = db.query(CommitSync).filter(CommitSync.repo_id == repo.id, CommitSync.analyzed == 0)
     if body.commit_ids:
         q = q.filter(CommitSync.id.in_(body.commit_ids))
@@ -81,16 +83,18 @@ async def gen_from_commits(body: CommitsIn, db: Session = Depends(get_db), user:
         raise HTTPException(400, "没有待分析的提交")
     existing = db.query(TestCase).filter(TestCase.project_id == repo.project_id).all()
     result = await _gen_from_commits(commits, existing)
-    for c in commits:
-        c.analyzed = 1
-    db.commit()
+    # 模型可用（含"确认无受影响接口"的空结果）或启发式有产出才标记已分析，
+    # 避免 LLM 故障时把这批提交的分析机会静默消费掉
+    if A.llm_available() or result["drafts"] or result["covered"]:
+        for c in commits:
+            c.analyzed = 1
+        db.commit()
     return result
 
 
 @router.post("/gen-from-text")
 async def gen_from_text(body: TextIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    if not db.get(Project, body.project_id):
-        raise HTTPException(404, "项目不存在")
+    check_project_access(body.project_id, user, db)   # 含项目存在性校验（404）
     out = await A.chat_json(
         "你是测试用例生成助手。根据需求描述生成一条 API 用例草稿。"
         '输出 {"name":str,"reason":str,"steps":[{"m":str,"url":str,"headers":"","body":"",'
@@ -103,22 +107,11 @@ async def gen_from_text(body: TextIn, db: Session = Depends(get_db), user: User 
 
 @router.post("/analyze-run/{run_id}")
 async def analyze_run(run_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    from .runs import _authorize_run   # 与执行记录查看共用的项目归属校验
     run = db.get(TestRun, run_id)
     if not run:
         raise HTTPException(404, "执行记录不存在")
-    from ..perms import accessible_project_ids
-    from ..models import TestCase, TestPlan, Flow
-    if user.role != "admin":
-        ids = set(accessible_project_ids(user, db))
-        pid = None
-        if run.plan_id and db.get(TestPlan, run.plan_id):
-            pid = db.get(TestPlan, run.plan_id).project_id
-        elif run.flow_id and db.get(Flow, run.flow_id):
-            pid = db.get(Flow, run.flow_id).project_id
-        elif run.case_id and db.get(TestCase, run.case_id):
-            pid = db.get(TestCase, run.case_id).project_id
-        if pid not in ids:
-            raise HTTPException(403, "无权访问该执行记录")
+    _authorize_run(run, user, db)
     if run.status != "failed":
         return {"cause": "本次执行全部通过，无需分析", "suggestion": "", "engine": "builtin"}
 
@@ -147,6 +140,9 @@ async def analyze_run(run_id: str, db: Session = Depends(get_db), user: User = D
 
 @router.get("/usage")
 def get_usage(user: User = Depends(current_user)):
+    """全平台 LLM 用量汇总：仅 admin（member 的用量在执行记录里按 run 可见）。"""
+    from ..auth import require_admin
+    require_admin(user)
     from ..ai import usage_summary
     return usage_summary()
 
@@ -156,6 +152,52 @@ class EnhanceIn(BaseModel):
     url: str = ""              # 录制的起始地址（给模型上下文）
     name: str = ""             # 可选：已有用例名
     context: str = ""          # 录制时的操作意图（如 AI 代劳的目标），帮助模型更有把握补断言
+
+
+class DesignDraftIn(BaseModel):
+    project_id: str = ""
+    goal: str                  # 测试意图（大白话，如"测货主创建询价单"）
+    url: str = ""              # 可选：起始页面，帮助模型对准路径与选择器风格
+
+
+@router.post("/draft-design")
+async def draft_design(body: DesignDraftIn, db: Session = Depends(get_db),
+                       user: User = Depends(current_user)):
+    """AI 起草测试设计：把测试意图拆成测试点（操作意图 + 可执行验收断言）。
+    人确认/编辑后存进用例——预期在设计阶段固化，判定权与执行者解耦。"""
+    if body.project_id:
+        check_project_access(body.project_id, user, db)
+    from ..engine.assertions import ASSERT_TYPES
+    sys_prompt = (
+        "你是测试设计师。把测试意图拆解为若干测试点，每个测试点给出操作意图与验收断言。"
+        "规则：\n"
+        "1) 断言是「可验证的结果」不是「要做的动作」——「页面显示登录成功」是断言，「点击登录按钮」不是；\n"
+        "2) 断言只能用这些类型：" +
+        "、".join(ASSERT_TYPES) +
+        "。expect_text/expect_not_text 填 value（页面应/不应出现的文字）；expect_url 填 value（URL 应包含的片段）；"
+        "expect_element 填 selector（应可见的元素）；expect_value 填 selector+value（输入框/元素应有的值）；"
+        "expect_api 填 m/url/field/expect（对被测系统接口的断言，url 用相对路径，可用 ${变量} 引用执行期保存的值如 ${bill_no}）；\n"
+        "3) 每个测试点 1-3 条断言，覆盖主流程结果即可，不追求穷举；涉及单据/编号流转的，"
+        "优先补一条 expect_api 做端到端数据一致性验证；\n"
+        "4) 负向场景（如错误密码应被拒绝）也拆成测试点，断言写预期的错误提示；\n"
+        "5) selector 不确定时用语义化的猜测（如 #msg、.error），人会在确认时修正。\n"
+        '只输出 JSON：{"points":[{"name":"测试点名","intent":"操作意图一句话",'
+        '"asserts":[{"type":"...","value":"..."}]}],"note":"给确认者的一句提醒（如哪些 selector 需人工核对）"}'
+    )
+    payload = json.dumps({"测试意图": body.goal, "起始页面": body.url}, ensure_ascii=False)
+    out = await A.chat_json(sys_prompt, payload, kind="gen-text")
+    points = (out or {}).get("points") if isinstance(out, dict) else None
+    if points and isinstance(points, list):
+        from .cases import _validated_points
+        try:
+            points = _validated_points(points)   # 原语合法性：引擎执行不了的断言不放行
+        except HTTPException:
+            points = []
+    if not points:
+        return {"points": [], "note": "大模型未配置或未返回有效设计，可手动添加测试点"
+                "（或到「系统设置」配置模型后再试）", "engine": "builtin"}
+    return {"points": points, "note": str((out or {}).get("note") or "")[:300],
+            "engine": A.current_model()}
 
 
 @router.post("/enhance-steps")
@@ -195,16 +237,20 @@ def regression_advice(db: Session = Depends(get_db), user: User = Depends(curren
     """回归建议：超过 14 天未执行的用例与流程 + 近 7 天有提交但未跑过的项目。"""
     from datetime import datetime, timedelta
     from ..models import TestRun, Flow
+    from ..perms import accessible_project_ids
+    ids = set(accessible_project_ids(user, db))
+    case_q = db.query(TestCase).filter(TestCase.project_id.in_(ids)) if ids else db.query(TestCase).filter(False)
+    flow_q = db.query(Flow).filter(Flow.project_id.in_(ids)) if ids else db.query(Flow).filter(False)
     threshold = datetime.utcnow() - timedelta(days=14)
     stale = []
-    for c in db.query(TestCase).all():
+    for c in case_q.all():
         last = (db.query(TestRun).filter(TestRun.case_id == c.id)
                 .order_by(TestRun.created_at.desc()).first())
         if last is None or last.created_at < threshold:
             stale.append({"case_id": c.id, "case_name": c.name,
                           "last_run": last.created_at.isoformat() if last else "从未执行"})
     stale_flows = []
-    for f in db.query(Flow).all():
+    for f in flow_q.all():
         last = (db.query(TestRun).filter(TestRun.flow_id == f.id)
                 .order_by(TestRun.created_at.desc()).first())
         if last is None or last.created_at < threshold:
@@ -213,8 +259,11 @@ def regression_advice(db: Session = Depends(get_db), user: User = Depends(curren
     week_ago = datetime.utcnow() - timedelta(days=7)
     hot = []
     from ..models import CommitSync
-    for cm in (db.query(CommitSync).filter(CommitSync.created_at > week_ago)
-               .order_by(CommitSync.created_at.desc()).limit(50).all()):
+    commit_q = db.query(CommitSync).filter(CommitSync.created_at > week_ago)
+    if user.role != "admin":   # member 只看自己项目下仓库的提交
+        repo_ids = {r.id for r in db.query(GitRepo).filter(GitRepo.project_id.in_(ids))}
+        commit_q = commit_q.filter(CommitSync.repo_id.in_(repo_ids) if repo_ids else False)
+    for cm in commit_q.order_by(CommitSync.created_at.desc()).limit(50).all():
         # repo→project 映射在列表页拼
         hot.append({"message": cm.message, "author": cm.author, "sha": cm.sha[:8],
                     "created_at": cm.created_at.isoformat()})

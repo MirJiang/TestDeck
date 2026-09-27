@@ -15,7 +15,7 @@ import time
 import httpx
 from pathlib import Path
 
-from .runner import get_field, evaluate_check
+from .runner import get_field, evaluate_check, verify_tls
 from .ui_runner import STATIC_DIR
 from .ai_runner import ai_drive
 from .browser import launch_browser
@@ -102,7 +102,7 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
 
     def role_api(role):
         if role not in api_clients:
-            api_clients[role] = httpx.Client(timeout=timeout, verify=False, trust_env=False,
+            api_clients[role] = httpx.Client(timeout=timeout, verify=verify_tls(), trust_env=False,
                                              base_url=base or None)
         return api_clients[role]
 
@@ -184,6 +184,16 @@ def run_flow(flow, env, run_id: str, timeout: float = 15.0,
         elif action == "click":
             page.click(sel, timeout=8000)
             res.update(**{"pass": True, "reason": f"点击 {sel}"})
+        elif action == "dblclick":   # 与 ui_runner 动作集对齐：AI 固化步骤可能含双击
+            page.dblclick(sel, timeout=8000)
+            res.update(**{"pass": True, "reason": f"双击 {sel}"})
+        elif action == "scroll":   # 滚轮滚动：dy>0 向下，不依赖滚动条位置
+            dy = max(-2000, min(2000, int(step.get("dy", 600) or 600)))
+            try:
+                page.mouse.wheel(0, dy)
+            except Exception:
+                page.evaluate(f"window.scrollBy(0, {dy})")
+            res.update(**{"pass": True, "reason": f"滚动页面 {dy}px"})
         elif action == "click_xy":  # 坐标类动作（验证码）：比例坐标按角色视口换算
             vs = page.viewport_size or {"width": 1280, "height": 800}
             x, y = int(step.get("x", 0) * vs["width"]), int(step.get("y", 0) * vs["height"])

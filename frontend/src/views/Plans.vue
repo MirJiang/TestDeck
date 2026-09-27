@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { api } from '../api'
 import RunDrawer from '../components/RunDrawer.vue'
-import { confirmDialog } from '../dialog'
+import { confirmDialog, toast } from '../dialog'
 
 const projects = ref([])
 const list = ref([])
@@ -16,16 +16,24 @@ const err = ref('')
 const filter = ref('all')
 
 onMounted(async () => {
-  projects.value = await api('/projects')
-  for (const p of projects.value) {
-    envsOf.value[p.id] = await api(`/projects/${p.id}/envs`)
-    casesOf.value[p.id] = await api(`/projects/${p.id}/cases`)
-    flowsOf.value[p.id] = await api(`/flows?project_id=${p.id}`)
-  }
-  await load()
+  try {
+    projects.value = await api('/projects')
+    // 各项目的 envs/cases/flows 并行拉取（原来串行 for-await，项目多时首屏极慢且任一失败全断）
+    await Promise.all(projects.value.map(async p => {
+      const [en, cs, fl] = await Promise.all([
+        api(`/projects/${p.id}/envs`).catch(() => []),
+        api(`/projects/${p.id}/cases`).catch(() => []),
+        api(`/flows?project_id=${p.id}`).catch(() => []),
+      ])
+      envsOf.value[p.id] = en; casesOf.value[p.id] = cs; flowsOf.value[p.id] = fl
+    }))
+    await load()
+  } catch (e) { toast('加载失败：' + e.message) }
 })
 
-async function load() { list.value = await api('/plans') }
+async function load() {
+  try { list.value = await api('/plans') } catch (e) { toast('加载失败：' + e.message) }
+}
 
 const shown = computed(() =>
   filter.value === 'all' ? list.value : list.value.filter(p => p.trigger === filter.value))
@@ -36,7 +44,11 @@ function openNew() {
     env_id: envsOf.value[p?.id]?.[0]?.id || '', trigger: 'manual', cron: '', enabled: true }
   show.value = true
 }
-function openEdit(pl) { form.value = { flow_ids: [], ...pl }; show.value = true }
+function openEdit(pl) {
+  // 空值防护：后端历史数据里 flow_ids/case_ids 可能为 null，模板直接 .length 会崩
+  form.value = { ...pl, case_ids: pl.case_ids || [], flow_ids: pl.flow_ids || [] }
+  show.value = true
+}
 
 function toggleIn(arr, id) {
   const i = arr.indexOf(id)

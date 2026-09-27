@@ -12,9 +12,11 @@ import json
 from mcp.server.fastmcp import Context
 
 from .db import SessionLocal
-from .models import User, Project, Env, TestCase, TestRun, Flow, ProjectUser, LLMLog
+from .models import User, Project, Env, TestCase, TestPlan, TestRun, Flow, ProjectUser, LLMLog
 from .auth import resolve_token
 from .perms import accessible_project_ids
+
+_BSESS_TIMEOUT = 120   # MCP 浏览器命令兜底超时：会话线程已死时 future 永不 resolve，必须有界
 
 
 def _user_of(ctx):
@@ -153,16 +155,18 @@ def _build():
     def _visible_run(user, r, db) -> bool:
         if user.role == "admin":
             return True
-        pid = r.plan_id
-        if pid:
-            return pid in set(accessible_project_ids(user, db))
-        if r.case_id:
+        ids = set(accessible_project_ids(user, db))
+        pid = None
+        if r.plan_id:
+            p = db.get(TestPlan, r.plan_id)   # 计划记录：plan_id 是计划 id，先取所属项目再比对
+            pid = p.project_id if p else None
+        elif r.case_id:
             c = db.get(TestCase, r.case_id)
-            return bool(c and _can_see(user, c.project_id, db))
-        if r.flow_id:
+            pid = c.project_id if c else None
+        elif r.flow_id:
             f = db.get(Flow, r.flow_id)
-            return bool(f and _can_see(user, f.project_id, db))
-        return False
+            pid = f.project_id if f else None
+        return pid in ids
 
     @mcp.tool()
     def run_get(run_id: str, ctx: Context = None) -> str:
@@ -370,7 +374,11 @@ def _build():
         except KeyError as e:
             return str(e)
         import asyncio
-        return _j(await asyncio.wrap_future(sess.post(sess.do_state)))
+        try:
+            return _j(await asyncio.wait_for(asyncio.wrap_future(sess.post(sess.do_state)),
+                                             timeout=_BSESS_TIMEOUT))
+        except asyncio.TimeoutError:
+            return "会话命令超时（会话可能已被回收，请重新打开）"
 
     @mcp.tool()
     async def browser_act(session_id: str, action: str, params: str = "",
@@ -394,7 +402,11 @@ def _build():
         if not isinstance(p, dict):
             return "params 需为 JSON 对象"
         import asyncio
-        return _j(await asyncio.wrap_future(sess.post(sess.do_action, action, p)))
+        try:
+            return _j(await asyncio.wait_for(asyncio.wrap_future(sess.post(sess.do_action, action, p)),
+                                             timeout=_BSESS_TIMEOUT))
+        except asyncio.TimeoutError:
+            return "会话命令超时（会话可能已被回收，请重新打开）"
 
     @mcp.tool()
     async def browser_screenshot(session_id: str, ctx: Context = None) -> str:
@@ -408,7 +420,10 @@ def _build():
             return str(e)
         import asyncio
         try:
-            return _j(await asyncio.wrap_future(sess.post(sess.do_screenshot)))
+            return _j(await asyncio.wait_for(asyncio.wrap_future(sess.post(sess.do_screenshot)),
+                                             timeout=_BSESS_TIMEOUT))
+        except asyncio.TimeoutError:
+            return "截图超时（会话可能已被回收，请重新打开）"
         except Exception as e:
             return f"截图失败：{type(e).__name__}: {e}"[:200]
 

@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { api, getToken } from '../api'
 import ReportDrawer from '../components/ReportDrawer.vue'
+import { toast } from '../dialog'
 
 const items = ref([])
 const total = ref(0)
@@ -36,8 +37,10 @@ async function load() {
   if (fStatus.value) p.set('status', fStatus.value)
   if (fStart.value) p.set('start', fStart.value)
   if (fEnd.value) p.set('end', fEnd.value)
-  const r = await api('/runs?' + p)
-  items.value = r.items; total.value = r.total
+  try {
+    const r = await api('/runs?' + p)
+    items.value = r.items; total.value = r.total
+  } catch (e) { toast('加载失败：' + e.message) }
 }
 function query() { page.value = 1; load() }
 function reset() {
@@ -59,6 +62,11 @@ const srcOf = (r) => r.plan_id
 
 async function exportCsv() {
   const resp = await fetch('/api/v1/runs/export.csv', { headers: { Authorization: 'Bearer ' + getToken() } })
+  if (!resp.ok) {   // 失败时别把 JSON 错误当 CSV 下载
+    let msg = `导出失败 (${resp.status})`
+    try { msg = (await resp.json()).detail || msg } catch { /* 非 JSON 错误体 */ }
+    toast(msg); return
+  }
   const blob = await resp.blob()
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob); a.download = 'runs.csv'; a.click(); URL.revokeObjectURL(a.href)

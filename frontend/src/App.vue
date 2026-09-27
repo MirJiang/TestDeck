@@ -36,7 +36,10 @@ const nav = [
   { path: '/users', label: '用户管理' },
 ]
 
-function logout() { clearAuth(); router.push('/login') }
+function logout() {
+  if (execPoll) { clearInterval(execPoll); execPoll = null }   // 登出即停角标轮询，别等下一次 401
+  clearAuth(); router.push('/login')
+}
 
 // ---- 右上角用户菜单 ----
 const showUser = ref(false)

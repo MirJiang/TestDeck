@@ -9,9 +9,10 @@ const report = ref(null)
 const advice = ref(null)
 
 onMounted(async () => {
-  try { advice.value = await api('/ai/regression-advice') } catch { }
-  const r = await api('/runs?size=8')
-  recent.value = r.items
+  try { advice.value = await api('/ai/regression-advice') } catch { /* 建议失败不阻塞 */ }
+  try {
+    const r = await api('/runs?size=8')
+    recent.value = r.items
   const total = r.total, passed = r.items.filter(x => x.status === 'passed').length
   stats.value = {
     runs: total,
@@ -19,6 +20,7 @@ onMounted(async () => {
     passRate: r.items.length ? Math.round(passed / r.items.length * 100) + '%' : '—',
     fail: r.items.filter(x => x.status === 'failed').length,
   }
+  } catch { /* 概览加载失败时保持占位数据，等下一次进入 */ }
 })
 
 function pct(r) { const t = r.pass_n + r.fail_n; return t ? Math.round(r.pass_n / t * 100) : 0 }

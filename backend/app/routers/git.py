@@ -106,7 +106,10 @@ async def webhook(secret: str, request: Request, db: Session = Depends(get_db)):
     raw = await request.body()
     _verify_hmac(request, raw)
     import json as _json
-    payload = _json.loads(raw)
+    try:
+        payload = _json.loads(raw)
+    except _json.JSONDecodeError:
+        raise HTTPException(400, "webhook body 不是合法 JSON")   # 未认证端点，畸形输入不抛 500
     # GitHub: {ref: refs/heads/main, commits: [{id, message, author: {name}, added/modified/removed}]}
     # GitLab: {object_kind: push, ref, commits: [{id, title, author_name}]}
     ref = payload.get("ref") or ""

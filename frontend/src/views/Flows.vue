@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { api } from '../api'
 import FlowDiagram from '../components/FlowDiagram.vue'
 import RecorderModal from '../components/RecorderModal.vue'
@@ -27,14 +27,22 @@ const UI_ACTIONS = [
 ]
 
 onMounted(async () => {
-  projects.value = await api('/projects')
-  if (projects.value.length) { pid.value = projects.value[0].id; await load() }
+  try {
+    projects.value = await api('/projects')
+    if (projects.value.length) { pid.value = projects.value[0].id; await load() }
+  } catch (e) { toast('加载失败：' + e.message) }
 })
 
+let loadSeq = 0
 async function load() {
-  list.value = await api(`/flows?project_id=${pid.value}`)
-  envs.value = await api(`/projects/${pid.value}/envs`)
-  cases.value = await api(`/projects/${pid.value}/cases`)
+  const seq = ++loadSeq
+  const p = pid.value
+  try {
+    const [fl, en, cs] = await Promise.all([
+      api(`/flows?project_id=${p}`), api(`/projects/${p}/envs`), api(`/projects/${p}/cases`)])
+    if (seq !== loadSeq) return   // 快速切换项目时丢弃慢返回的旧数据，防串列表
+    list.value = fl; envs.value = en; cases.value = cs
+  } catch (e) { toast('加载失败：' + e.message) }
 }
 
 function openNew() {
@@ -45,8 +53,14 @@ function openNew() {
   }
   selected.value = -1
 }
+// 步骤的稳定 key：上移/下移是交换操作，index 作 key 会让 Vue 就地复用错位；_k 存进步骤对象（执行器忽略）
+let kseq = 0
+const nk = () => 'k' + (++kseq)
+
 async function openEdit(id) {
-  editing.value = await api('/flows/' + id)
+  const d = await api('/flows/' + id)
+  d.steps = (d.steps || []).map(s => ({ _k: nk(), ...s }))
+  editing.value = d
   selected.value = -1
 }
 
@@ -59,10 +73,11 @@ function addStep(type) {
     api: { role, type: 'api', m: 'POST', url: '', headers: '', body: '',
            check: { type: 'status', expect: '200', field: '' }, save: { name: '', from: '' } },
   }
-  editing.value.steps.push(tpl[type] || tpl.api)
+  editing.value.steps.push({ _k: nk(), ...(tpl[type] || tpl.api) })
   selected.value = editing.value.steps.length - 1
 }
 function onStepType(s) {
+  const keepK = s._k
   const fresh = { role: s.role, type: s.type }
   if (s.type === 'ui') Object.assign(fresh, { action: 'goto', url: '', selector: '', value: '' })
   else if (s.type === 'ai') Object.assign(fresh, { goal: '', url: '', max_steps: 200 })
@@ -71,6 +86,7 @@ function onStepType(s) {
     check: { type: 'status', expect: '200', field: '' }, save: { name: '', from: '' } })
   Object.keys(s).forEach(k => delete s[k])
   Object.assign(s, fresh)
+  s._k = keepK || nk()   // 换类型重建对象，key 沿用防 DOM 错位
 }
 function delStep(i) { editing.value.steps.splice(i, 1) }
 function moveStep(i, d) {
@@ -153,6 +169,9 @@ const aiTips = ref(null)
 const aiLoading = ref(false)
 let curRunId = ''
 let pollTimer = null
+let runSeq = 0   // 执行序号：新一轮执行开始后，旧轮询/旧请求的迟到结果不再写入
+
+onUnmounted(() => { clearInterval(pollTimer) })
 
 async function run(f) {
   running.value = await api('/flows/' + f.id)   // 取完整定义（含 roles）
@@ -161,24 +180,29 @@ async function run(f) {
   runEnv.value = envs.value[0]?.id || ''
 }
 async function doRun() {
+  const flowId = running.value?.id
+  if (!flowId) return
+  const seq = ++runSeq
   runLoading.value = true; result.value = null; aiTips.value = null
+  clearInterval(pollTimer)
   // 后端边执行边把明细写库；请求返回前轮询最新一条 running 记录，步骤实时显示
   pollTimer = setInterval(async () => {
     try {
-      const r = await api(`/runs?flow=${running.value.id}&size=1`)
+      const r = await api(`/runs?flow=${flowId}&size=1`)
       const cur = r.items?.[0]
       if (cur && cur.status === 'running') {
         curRunId = cur.id
-        result.value = await api('/runs/' + cur.id)
+        if (seq === runSeq && runLoading.value)
+          result.value = await api('/runs/' + cur.id)
       }
     } catch { /* 轮询失败忽略，等下一轮 */ }
   }, 1200)
   try {
-    result.value = await api(`/flows/${running.value.id}/run`,
+    const final = await api(`/flows/${flowId}/run`,
       { method: 'POST', body: { env_id: runEnv.value } }, { timeout: 600000 })
+    if (seq === runSeq) result.value = final   // 慢到的旧轮询不覆盖最终结果
   } catch (e) { await alertDialog(e.message, '执行失败') } finally {
-    runLoading.value = false; curRunId = ''
-    clearInterval(pollTimer)
+    if (seq === runSeq) { runLoading.value = false; curRunId = ''; clearInterval(pollTimer) }
   }
 }
 async function cancelRun() {
@@ -235,7 +259,7 @@ function stepsFor(result) {
           <td><b>{{ f.name }}</b></td>
           <td class="mono">{{ f.roles }}</td>
           <td class="mono">{{ f.steps }}</td>
-          <td class="mono muted">{{ f.updated_at.slice(0, 10) }}</td>
+          <td class="mono muted">{{ (f.updated_at || '').slice(0, 10) }}</td>
           <td style="text-align:right"><a @click="run(f)">执行</a> · <a @click="openEdit(f.id)">编辑</a> ·
             <a @click="openHistory(f)">记录</a> · <a @click="manageBaselines(f)">基线</a> ·
             <a style="color:var(--err)" @click="del(f)">删除</a></td>
@@ -285,7 +309,7 @@ function stepsFor(result) {
       </div>
       <FlowDiagram :roles="editing.roles" :steps="editSteps" editable @select="selected = $event" />
 
-      <div v-for="(s, i) in editing.steps" :key="i" v-show="selected === i" class="step open" style="margin-top:12px">
+      <div v-for="(s, i) in editing.steps" :key="s._k || i" v-show="selected === i" class="step open" style="margin-top:12px">
         <div class="hd">
           <span class="idx">{{ i + 1 }}</span>
           <span class="chip">{{ editing.roles.find(r => r.key === s.role)?.name || s.role }}</span>
@@ -444,7 +468,7 @@ function stepsFor(result) {
             <td class="mono">{{ r.id }}</td>
             <td><span :class="r.status === 'passed' ? 'st ok' : 'st err'">{{ r.status === 'passed' ? '跑通' : '中断' }}</span></td>
             <td class="mono">{{ r.duration }}s</td>
-            <td class="mono muted">{{ r.created_at.replace('T',' ').slice(0,16) }}</td>
+            <td class="mono muted">{{ (r.created_at || '').replace('T',' ').slice(0,16) }}</td>
             <td><a @click="viewDetail(r)">详情</a></td>
           </tr>
           <tr v-if="!historyRows.length"><td colspan="5" class="empty">暂无记录</td></tr>

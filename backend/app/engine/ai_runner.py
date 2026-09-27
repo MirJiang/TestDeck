@@ -193,7 +193,8 @@ def run_ai_api_case(case, env, run_id: str, on_step=None) -> dict:
     if not base:
         return _fail("AI-API 用例需要环境配置 Base URL（接口域名）", "缺少 Base URL")
 
-    with A.run_context(run_id), httpx.Client(base_url=base, timeout=20, trust_env=False) as client:
+    from .runner import verify_tls
+    with A.run_context(run_id), httpx.Client(base_url=base, timeout=20, verify=verify_tls(), trust_env=False) as client:
         endpoints = (cfg.get("endpoints") or [])[:30]
         for i in range(1, max_steps + 1):
             if _q.is_cancelled(run_id):
@@ -293,7 +294,8 @@ def _replay_api(fixed: list, env, on_step=None) -> dict:
                             "reason": "AI-API 用例需要环境配置 Base URL", "ms": 0}],
                 "saved": {}, "summary": "缺少 Base URL"}
 
-    with httpx.Client(base_url=base, timeout=20, trust_env=False) as client:
+    from .runner import verify_tls
+    with httpx.Client(base_url=base, timeout=20, verify=verify_tls(), trust_env=False) as client:
         for i, st in enumerate(fixed, 1):
             req = st.get("request") or {}
             check = st.get("check") or {"type": "status", "expect": "200"}
@@ -413,7 +415,16 @@ def _exec_action(page, act: dict, variables: dict):
             loc.fill(val, timeout=8000)
         return True, f"在 {sel} 输入 {val}", None
     if op == "expect_text":
+        # 与 ui_runner/flow_runner 同语义：慢渲染页面给 5s 等待窗口，而不是立即判定
+        try:
+            page.wait_for_load_state("domcontentloaded")
+        except Exception:
+            pass
+        deadline = time.time() + 5
         body = page.inner_text("body", timeout=8000)
+        while val not in body and time.time() < deadline:
+            time.sleep(0.2)
+            body = page.inner_text("body", timeout=8000)
         ok = val in body
         return ok, (f"页面包含「{val}」" if ok else f"页面未包含「{val}」"), None
     if op == "save":
@@ -444,7 +455,9 @@ def _model_hint() -> str:
 
 def ai_drive(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEPS,
              run_id: str = "", shot_tag: str = "ai", on_step=None, engine: str = "",
-             page_map: str = "", project_id: str = "", map_keys: set | None = None) -> dict:
+             page_map: str = "", project_id: str = "", map_keys: set | None = None,
+             resume: dict | None = None, points: list | None = None,
+             api_base: str = "") -> dict:
     """同步驱动（B4 起唯一路径）：委托 AgentScope ReAct agent（brain_agentscope.run_brain）。
     返回 {status, pass_n, fail_n, detail, saved, summary}，须在执行队列线程调用。
 
@@ -452,30 +465,37 @@ def ai_drive(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEP
     engine 会被标注到首个步骤明细，供前端展示本次用的浏览器引擎。
     project_id 非空时启用执行比对信号：每步把当前页与应用地图（期望基线）比对，地图记录的
     按钮缺失就在该步明细记 warning——不判失败、不计入 pass_n/fail_n、不回写地图。
+    resume：断点续跑上下文（见 run_brain 文档）。
+    points：测试设计的测试点清单——有预设时判定权移交引擎断言（AI 只负责到达状态与失败定性）。
+    api_base：expect_api 断言的相对路径基准（环境 Base URL）。
     """
     from .brain_agentscope import run_brain   # 惰性导入：模块反向依赖 ai_runner 的动作层
     with A.run_context(run_id):   # 本执行的 LLM 调用都归属到 llm_logs.run_id
         r = run_brain(page, goal, variables, max_steps=max_steps, run_id=run_id,
                       shot_tag=shot_tag, on_step=on_step, engine=engine,
-                      page_map=page_map, project_id=project_id, map_keys=map_keys)
+                      page_map=page_map, project_id=project_id, map_keys=map_keys,
+                      resume=resume, points=points, api_base=api_base)
     r.pop("brain", None)     # 内部标注不进执行明细契约
     r.pop("usage", None)     # 用量已经 on_usage 实时写入 llm_logs
     return r
 
 
-def run_ai_case(case, env, run_id: str, on_step=None) -> dict:
+def run_ai_case(case, env, run_id: str, on_step=None, resume: dict | None = None) -> dict:
     """AI 用例统一入口，按 steps[0] 分派。由执行队列线程调用。
 
     cfg = {target: "ui"|"api", goal, start_url, max_steps, engine, fixed_steps?}
       - target=api            → run_ai_api_case（模型设计请求，httpx 执行）
       - fixed_steps 且无 goal → 固定步骤回放（录制/固化产物，零 token）
       - 其余                  → 浏览器 + ai_drive（模型看页面操作）
+    resume：断点续跑上下文 {start_url, done_summary, saved}——起始页优先用断点页，
+    已完成步骤摘要与已存变量注入提示词（见 brain_agentscope.run_brain）。
     """
     cfg = (case.steps or [{}])[0] if case.steps else {}
     variables = _case_vars(case, env)
     goal = substitute(cfg.get("goal", ""), variables)
     target = (cfg.get("target") or "ui").strip().lower()
     engine = (cfg.get("engine") or "").strip().lower() or None
+    resume = resume or {}
 
     if target == "api":
         fixed_api = cfg.get("fixed_api_steps") or []
@@ -495,6 +515,9 @@ def run_ai_case(case, env, run_id: str, on_step=None) -> dict:
     base = (env.base_url or "").rstrip("/") if env else ""
     if start.startswith("/") and base:
         start = base + start
+    rstart = str(resume.get("start_url") or "")
+    if rstart.startswith("http"):   # 断点续跑：从断点页起跑（而不是用例起始页从头来）
+        start = rstart
     max_steps = int(cfg.get("max_steps") or DEFAULT_MAX_STEPS)
 
     from playwright.sync_api import sync_playwright
@@ -538,7 +561,10 @@ def run_ai_case(case, env, run_id: str, on_step=None) -> dict:
                      on_step=on_step, engine=used,
                      page_map=app_map_brief(pid),
                      project_id=pid,
-                     map_keys=map_page_keys(pid) if pid else set())
+                     map_keys=map_page_keys(pid) if pid else set(),
+                     resume=resume,
+                     points=cfg.get("test_points") or None,
+                     api_base=base)
         if detail:  # 把 note 并进结果明细头部（idx 保持 ai_drive 的编号可读性）
             r["detail"] = detail + r["detail"]
             r["pass_n"] += 1

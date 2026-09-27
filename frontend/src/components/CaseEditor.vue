@@ -107,6 +107,36 @@ const hasEp = ep => (c.value.endpoints || []).some(x => x.method === ep.method &
 
 function save() { emit('save', JSON.parse(JSON.stringify(c.value))) }
 
+// ---- 测试设计：测试点与验收断言（先定验收再执行；断言由引擎执行，AI 只负责到达状态） ----
+const ASSERT_TYPES = [
+  { type: 'expect_text', label: '页面包含文字', fields: ['value'] },
+  { type: 'expect_not_text', label: '页面不包含文字', fields: ['value'] },
+  { type: 'expect_url', label: 'URL 包含', fields: ['value'] },
+  { type: 'expect_element', label: '元素可见', fields: ['selector'] },
+  { type: 'expect_value', label: '元素的值等于', fields: ['selector', 'value'] },
+  { type: 'expect_api', label: '接口返回校验', fields: ['m', 'url', 'field', 'expect'] },
+]
+const fieldsOf = t => (ASSERT_TYPES.find(x => x.type === t) || {}).fields || ['value']
+const drafting = ref(false)
+const draftNote = ref('')
+async function draftDesign() {
+  if (!c.value.goal.trim()) { toast('先填写测试目标，AI 才知道要拆解什么'); return }
+  drafting.value = true; draftNote.value = ''
+  try {
+    const r = await api('/ai/draft-design', { method: 'POST', body: {
+      project_id: c.value.project_id, goal: c.value.goal, url: c.value.start_url || '' } })
+    if (r.points?.length) {
+      c.value.testPoints = r.points
+      draftNote.value = r.note || ''
+      toast(`AI 起草了 ${r.points.length} 个测试点，请逐条确认（selector 可能需要人工修正）`, 4000)
+    } else { draftNote.value = r.note || ''; toast(draftNote.value || '未生成测试点，可手动添加') }
+  } catch (e) { toast('起草失败：' + e.message) } finally { drafting.value = false }
+}
+function addPoint() { (c.value.testPoints || (c.value.testPoints = [])).push({ name: '', intent: '', asserts: [] }) }
+function delPoint(i) { c.value.testPoints.splice(i, 1) }
+function addAssert(p) { (p.asserts || (p.asserts = [])).push({ type: 'expect_text', value: '' }) }
+function delAssert(p, i) { p.asserts.splice(i, 1) }
+
 // ---- 测试账号：项目用户列表选择带出，可改；执行与录制时注入 ${username}/${password} ----
 const pusers = ref([])
 const selUser = ref('')
@@ -149,6 +179,45 @@ const recInitialUrl = computed(() => {
       <div class="fld"><label>测试目标（用大白话描述要做的事和预期结果，可引用 ${'{'}变量{'}'} 如账号密码）</label>
         <textarea v-model="c.goal" rows="4"
           :placeholder="isUI ? '用 ${username} 登录系统，创建一张从上海到北京的询价单，记住单号，页面应提示创建成功' : '调用创建询价单接口，用 ${username} 的身份创建一张上海到北京的单据，应返回 code=0 并记住单号'"></textarea></div>
+
+      <div class="panel" style="background:#fcfcfd">
+        <div class="bar" style="margin-bottom:6px">
+          <h3 style="font-size:13px">测试设计 · 测试点与验收断言（推荐）</h3>
+          <div style="display:flex;gap:6px">
+            <button class="btn sm pri" :disabled="drafting" @click="draftDesign">{{ drafting ? '起草中…' : 'AI 起草测试设计' }}</button>
+            <button class="btn sm" @click="addPoint">+ 手动加测试点</button>
+          </div>
+        </div>
+        <div class="faint" style="font-size:12px;margin-bottom:8px">
+          像正常测试流程一样先明确「这次要验证什么」：每个测试点 = 操作意图 + 验收断言。<b>断言由引擎执行、结果客观</b>，
+          AI 只负责把页面操作到可验证的状态；断言未通过时 AI 会先判断是自己没操作到位（纠正后重试）还是被测系统的问题（定性为缺陷）。
+          不填测试点则沿用旧行为：AI 自主执行并自评结果。
+        </div>
+        <div v-if="draftNote" class="muted" style="font-size:12.5px;margin-bottom:6px">AI 提醒：{{ draftNote }}</div>
+        <div v-for="(p, i) in c.testPoints || []" :key="i"
+             style="border:1px solid var(--line);border-radius:7px;padding:10px;margin-bottom:8px">
+          <div class="row">
+            <span class="idx">{{ i + 1 }}</span>
+            <input v-model="p.name" placeholder="测试点名，如：能登录成功" style="width:210px">
+            <input v-model="p.intent" placeholder="操作意图（给 AI 的一句话，可空）" style="flex:1">
+            <button class="del" style="color:var(--err)" @click="delPoint(i)">删</button>
+          </div>
+          <div v-for="(a, j) in p.asserts || []" :key="j" class="row" style="margin-top:6px;font-size:12.5px;flex-wrap:wrap">
+            <select v-model="a.type" style="width:150px;flex:none">
+              <option v-for="t in ASSERT_TYPES" :key="t.type" :value="t.type">{{ t.label }}</option>
+            </select>
+            <template v-for="f in fieldsOf(a.type)" :key="f">
+              <select v-if="f === 'm'" v-model="a.m" style="width:76px;flex:none">
+                <option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option>
+              </select>
+              <input v-else v-model="a[f]" class="mono" :placeholder="f === 'value' ? '期望值' : f"
+                     style="flex:1;min-width:90px">
+            </template>
+            <button class="del" style="color:var(--faint)" @click="delAssert(p, j)">删</button>
+          </div>
+          <button class="btn sm" style="margin-top:6px" @click="addAssert(p)">+ 加断言</button>
+        </div>
+      </div>
 
       <div class="two">
         <div class="fld"><label>测试账号（项目用户列表带出，可改）</label>

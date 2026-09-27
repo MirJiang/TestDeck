@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api, getToken } from '../api'
+import { toast } from '../dialog'
 
 const props = defineProps({ runId: String })
 const emit = defineEmits(['close'])
@@ -8,9 +9,11 @@ const run = ref(null)
 
 // 截图点击放大（灯箱）：点遮罩或 Esc 关闭
 const zoom = ref('')
+const loadErr = ref('')
 const onKey = (e) => { if (e.key === 'Escape') zoom.value = '' }
 onMounted(async () => {
-  run.value = await api('/runs/' + props.runId)
+  try { run.value = await api('/runs/' + props.runId) }
+  catch (e) { loadErr.value = e.message }   // 失败给出提示而不是永远停在「加载中…」
   window.addEventListener('keydown', onKey)
 })
 onUnmounted(() => window.removeEventListener('keydown', onKey))
@@ -35,6 +38,11 @@ const srcOf = (r) => r.plan_name
 async function exportHtml() {
   const resp = await fetch('/api/v1/runs/' + props.runId + '/export',
     { headers: { Authorization: 'Bearer ' + getToken() } })
+  if (!resp.ok) {   // 失败时别把 JSON 错误当报告下载
+    let msg = `导出失败 (${resp.status})`
+    try { msg = (await resp.json()).detail || msg } catch { /* 非 JSON 错误体 */ }
+    toast(msg); return
+  }
   const blob = await resp.blob()
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
@@ -51,7 +59,7 @@ async function exportHtml() {
         <button class="x" @click="emit('close')">✕</button>
       </div></div>
     <div class="db">
-      <div v-if="!run" class="muted">加载中…</div>
+      <div v-if="!run" class="muted">{{ loadErr ? '加载失败：' + loadErr : '加载中…' }}</div>
       <template v-if="run">
         <div style="display:flex;gap:26px;margin-bottom:14px;font-size:13px">
           <div><div class="muted" style="font-size:11.5px">来源</div><b>{{ srcOf(run) }}</b></div>

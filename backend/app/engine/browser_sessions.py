@@ -79,6 +79,14 @@ class BrowserSession:
             self.ready.set()
         finally:
             self.closed = True
+            # 线程已死但 post() 刚通过 closed 检查的命令：就地失败，避免 future 永不 resolve
+            while True:
+                try:
+                    _fn, _args, fut = self.cmds.get_nowait()
+                except Empty:
+                    break
+                if fut is not None:
+                    fut.set_exception(RuntimeError("会话已关闭"))
             try:
                 if browser:
                     browser.close()
@@ -108,10 +116,14 @@ class BrowserSession:
     close_requested = False
 
     def close(self):
-        """请求关闭：投递哨兵，等待线程退出（幂等）。"""
+        """请求关闭：投递哨兵并等待线程退出（幂等）。"""
         self.close_requested = True
         try:
             self.cmds.put((None, None, None))
+        except Exception:
+            pass
+        try:
+            self._thread.join(timeout=10)
         except Exception:
             pass
 

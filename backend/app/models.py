@@ -143,6 +143,7 @@ class TestRun(Base):
     fail_n = Column(Integer, default=0)
     duration = Column(Float, default=0.0)
     detail = Column(JSON, default=list)
+    saved = Column(JSON, default=dict)   # AI 执行 save 的变量终值（断点续跑的上下文来源）
     trigger_by = Column(String(128), default="user")
     created_at = Column(DateTime, default=now)
 

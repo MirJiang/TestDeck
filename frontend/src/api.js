@@ -13,12 +13,13 @@ export function clearAuth() {
   document.cookie = 'td_token=; Max-Age=0; path=/'
 }
 
-export async function api(path, opts = {}) {
+export async function api(path, opts = {}, extra = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) }
   const t = getToken()
   if (t) headers.Authorization = `Bearer ${t}`
   const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), opts.timeout || 120000)
+  // 超时可放 opts.timeout（常规写法）或第三个参数 { timeout }（长执行调用点的写法，两处都支持）
+  const timer = setTimeout(() => ctrl.abort(), extra.timeout ?? opts.timeout ?? 120000)
   let resp
   try {
     resp = await fetch('/api/v1' + path, { ...opts, headers, signal: ctrl.signal,

@@ -71,3 +71,8 @@ ehthumbs.db
 .aider*
 .token_epoch
 .secret_key
+
+# ---- 行为评估本地报告（evals 运行产物）----
+backend/evals/reports/
+*.db-shm
+*.db-wal

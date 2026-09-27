@@ -13,8 +13,8 @@
 |---|---|
 | 认证与用户 | JWT 登录（滑动续期：令牌剩余不足半程自动换发 X-Renewed-Token），admin / member 双角色；独立用户管理（建号、重置密码、自助改密） |
 | 项目 / 环境 | 多项目管理，项目级权限隔离（成员只见自己创建或被加入的项目）；每个项目**一个环境地址 + 附加变量**，并提供**项目级测试用户列表**（账号密码池，支持批量导入），创建用例与流程角色时选择带出、可改 |
-| AI 用例（统一形态） | 目标下分两类：**API 测试**——模型根据目标自主设计请求（方法/路径/头/体）并发送、检查响应、记住 token；**UI 测试**——模型看页面状态（+截图，可选）实时决策点哪/填什么；支持拖拽（滑块验证码）与坐标点击（点选验证码）。可录制/固化为**固定步骤**回放，回归零 token。历史手动 API/UI 用例仍可执行与删除 |
-| 流程测试 | 按业务线串联多角色：每角色独立登录态（API 各自 cookie、UI 各自浏览器会话）；API/UI/AI 步骤混排；**引用已有用例作为一步**（在角色会话内联执行，save 结果直通共享区）；共享变量传递业务单据；截图基线对比（视觉回归）；泳道图展示；执行流式进度、可取消 |
+| AI 用例（统一形态） | **测试设计先行**：先用大白话描述测试意图 → AI 起草测试设计（测试点 = 操作意图 + 类型化验收断言，expect_text/url/element/value/not_text/**expect_api**）→ 人确认后固化；执行时 AI 只负责把页面操作到可验证状态，**断言由引擎执行、结果客观**，断言未通过时 AI 复核定性（自己没操作到位→纠正重试；被测系统问题→定性 defect；环境问题→blocked），通过永远只能由断言产生；无测试点的旧用例沿用 AI 自评。目标下分 **API 测试**（模型自主设计请求、检查响应、记住 token）与 **UI 测试**（模型看页面实时决策，支持验证码）；可录制/固化为**固定步骤**回放（回归零 token）；失败执行可**断点续跑**。历史手动 API/UI 用例仍可执行与删除 |
+| 流程测试 | 按业务线串联多角色：每角色独立登录态（API 各自 cookie、UI 各自浏览器会话）；API/UI/AI 步骤混排；**引用已有用例作为一步**（在角色会话内联执行，save 结果直通共享区）；共享变量传递业务单据；截图基线对比（视觉回归）；泳道图展示；执行流式进度、可取消、AI 代劳录制时可**运行中插话**（steer，不打断当前动作） |
 | 测试计划 | **用例 + 流程**的批量执行容器（条目互相独立，失败不中断批次）+ 默认环境；手动 / cron 定时 / Git 默认分支 push 三种触发；执行记录统一进「执行记录」 |
 | AI 辅助 | 从 Git 提交生成用例草稿、自然语言生成用例、失败原因分析（用例/计划/流程）、用量统计、回归建议（用例与流程） |
 | Git 集成 | 绑定仓库生成 webhook（兼容 GitHub/GitLab push），提交同步并可自动触发回归；内网可用 git-sync CLI |
@@ -72,6 +72,7 @@ backend/
     engine/            runner ui_runner flow_runner ai_runner brain_agentscope app_mapper browser_sessions ui_recorder browser queue
     cli/git_sync.py    内网无 webhook 时同步提交的命令行
   tests/               单元 + 接口测试（test_*.py）、e2e 脚本、mock 被测系统、假 LLM 服务器
+  evals/               行为级评估（固定任务集 × 引擎端到端 × 服务端状态客观判定；fake/real 双模式）
   static/              执行截图（30 天自动清理；禁止对外公开）
 frontend/
   src/
@@ -105,7 +106,10 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 - 每轮发给模型：目标、可用变量（含角色/共享变量）、最近 12 步历史、可见交互元素（选择器含 id/name/placeholder/type/同标签序号兜底）、页面文字摘要；若模型配置勾选「支持视觉」再附当前视口截图。
 - 模型动作集：`goto / click / click_xy / drag / fill / expect_text / save / done`。
 - **AgentScope Brain（唯一决策循环）**：`ai_drive` 委托 AgentScope ReAct agent（`engine/brain_agentscope.py`）——动作集注册为白名单工具（权限引擎 DONT_ASK + ALLOW 规则强制，绝不注册 shell/文件/代码执行类工具）、done 走结构化输出、模型走 llm_configs 多模型回退链（失败自动换下一档）、视觉模式经 `browser_look` 工具按需取截图（实测可解开点选验证码）。执行明细/on_step 流式进度/取消/断路器/token 记账与页面状态注入与旧循环同构，调用方零改动。
-- 防失控：连续 3 次相同动作失败熔断；最大步数上限（默认 200，用例/流程步骤可调）；每次执行的 token 消耗按 run_id 归属 `llm_logs`，执行列表/详情与模型配置页（按天）可见。**token 优化**：工具每步返回的页面状态做增量回报——同页面且元素集合一致时只回紧凑摘要（输入值变化单独列出）；**元素短句柄寻址**（借鉴编码 agent 的「文件:行号」稳定寻址）：状态回包里元素标注为 `[b3] input 请输入账号`，动作填句柄即可，句柄整个执行期与 selector 一一对应不复用，比每步重发完整 CSS 选择器省大量 token；`browser_fill_many` 一次批量填 ≤12 个输入框（工具层拆成原子 fill，明细与固化回放不变）；上下文压缩阈值由 `TD_MODEL_CONTEXT_SIZE` 控制（默认 65536，0=用模型默认 128k），压缩触发比例 0.3（阈值 ≈20k，原 0.8≈52k）、压缩后保留比例 0.06、截图仅保留最近一张（每张估算 2000 token，每步推理前裁剪）、单条工具结果上限 12k，压缩摘要为结构化「测试状态卡片」（目标/当前页/表单已填/变量/下一步/坑），比通用续作摘要更省且不失真（压缩调用同样经模型回退链记账，计入 llm_logs）；地图已收录的页面省略页面文字段，但含校验/报错关键词（必填/失败/错误等）时保留——校验提示是临时文字、地图里没有；click 常规超时（5s）后强制重试一次，减少模型"看截图改坐标"的两步回退；日期/时间提示词引导优先 fill 完整值。历史在两次压缩之间纯追加（前缀稳定），利于 qwen 系隐式上下文缓存计费折扣；压缩是唯一的缓存重置点。**弹窗优先提取**：可见 dialog/drawer 的内容单独提取（配额 40，主页面 80）——弹窗 DOM 追加在 body 末尾，顺序遍历会被主页面挤出上限导致 AI 对弹窗盲操；弹窗内零交互信号的表格行降级收录为可点条目（row，弹窗里的行几乎必然响应点击/双击）。选择器重复时追加 `>> nth=k`，同文案元素（如两个「添加」按钮）各自有唯一句柄。白名单含 browser_dblclick（双击选行类弹窗，单击高亮双击选中的控件）、browser_click_xy_many（验证码点选一次点完 N 个坐标，省逐点往返）、browser_scroll（滚轮滚动，不依赖滚动条位置，滚的是指针所在的可滚动区域）；状态提取放开视口边界——屏外已渲染元素也收录（点击/填写句柄时浏览器自动滚过去），解决长表单折叠线以下区块 AI 看不见也够不着的死结。
+- 防失控：连续 3 次相同动作失败熔断；最大步数上限（默认 200，用例/流程步骤可调）；每次执行的 token 消耗按 run_id 归属 `llm_logs`，执行列表/详情与模型配置页（按天）可见。
+- **运行中插话（steer，录制 AI 代劳）**：`POST /cases/ui-record/{sid}/steer-ai`——文本经 run_id 注册表排队，在下一次工具结果末尾注入（不打断当前模型调用，也不插进工具调用与结果之间），模型在下一个决策点看到并改道；插话内容留痕到该步明细的 `steer` 字段，执行结束后未消费的插话自动丢弃。
+- **测试设计先行（用例级验收断言）**：用例可带测试点清单（`test_points`，AI 起草/手写，人确认），每个测试点 = 操作意图 + 类型化断言（`engine/assertions.py`：expect_text/expect_not_text/expect_url/expect_element/expect_value/expect_api，后者支持 `${变量}` 与相对路径拼环境 Base URL）。执行时 brain 注册 `browser_verify`（引擎执行该点断言，客观结果回喂）与 `browser_conclude`（AI 对未通过的点定性 defect/blocked）；**断言未通过 ≠ 测试失败**——AI 判断是自己未到达正确状态则纠正后重试（同点最多 3 次），确认被测系统问题才定性缺陷；执行收尾引擎对未验证的点**兜底跑一次断言**（判定不依赖模型自觉）。判定不变量：**passed 永远来自引擎断言，done(passed) 不能翻案**。结果带 `points` 汇总（通过/未过/阻塞 + 断言事实 + 定性说明），RunDrawer 逐点展示。
+- **断点续跑（AI 用例）**：执行落库时把 save 的变量终值写入 `test_runs.saved`；失败后 `POST /runs/{rid}/resume` 从明细确定性构建续跑上下文（已完成步骤摘要 + 已存变量 + 最后成功的 goto 页），新执行从断点页起跑、上下文注入提示词（不重复已完成的业务动作，登录态失效先重登）。浏览器会话与登录态无法持久化，是"知识续跑"而非"进程续跑"。**token 优化**：工具每步返回的页面状态做增量回报——同页面且元素集合一致时只回紧凑摘要（输入值变化单独列出）；**元素短句柄寻址**（借鉴编码 agent 的「文件:行号」稳定寻址）：状态回包里元素标注为 `[b3] input 请输入账号`，动作填句柄即可，句柄整个执行期与 selector 一一对应不复用，比每步重发完整 CSS 选择器省大量 token；`browser_fill_many` 一次批量填 ≤12 个输入框（工具层拆成原子 fill，明细与固化回放不变）；上下文压缩阈值由 `TD_MODEL_CONTEXT_SIZE` 控制（默认 65536，0=用模型默认 128k），压缩触发比例 0.3（阈值 ≈20k，原 0.8≈52k）、压缩后保留比例 0.06、截图仅保留最近一张（每张估算 2000 token，每步推理前裁剪）、单条工具结果上限 12k，压缩摘要为结构化「测试状态卡片」（目标/当前页/表单已填/变量/下一步/坑），比通用续作摘要更省且不失真（压缩调用同样经模型回退链记账，计入 llm_logs）；地图已收录的页面省略页面文字段，但含校验/报错关键词（必填/失败/错误等）时保留——校验提示是临时文字、地图里没有；click 常规超时（5s）后强制重试一次，减少模型"看截图改坐标"的两步回退；日期/时间提示词引导优先 fill 完整值。历史在两次压缩之间纯追加（前缀稳定），利于 qwen 系隐式上下文缓存计费折扣；压缩是唯一的缓存重置点。**弹窗优先提取**：可见 dialog/drawer 的内容单独提取（配额 40，主页面 80）——弹窗 DOM 追加在 body 末尾，顺序遍历会被主页面挤出上限导致 AI 对弹窗盲操；弹窗内零交互信号的表格行降级收录为可点条目（row，弹窗里的行几乎必然响应点击/双击）。选择器重复时追加 `>> nth=k`，同文案元素（如两个「添加」按钮）各自有唯一句柄。白名单含 browser_dblclick（双击选行类弹窗，单击高亮双击选中的控件）、browser_click_xy_many（验证码点选一次点完 N 个坐标，省逐点往返）、browser_scroll（滚轮滚动，不依赖滚动条位置，滚的是指针所在的可滚动区域）；状态提取放开视口边界——屏外已渲染元素也收录（点击/填写句柄时浏览器自动滚过去），解决长表单折叠线以下区块 AI 看不见也够不着的死结。
 - 固化：AI 跑通后可把操作明细转存为普通 UI 用例，回归零 token。
 
 ### 4.4 浏览器引擎
@@ -117,7 +121,7 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 - 官方 MCP SDK（1.x）的 FastMCP 挂载于 `/mcp`（Streamable HTTP），`TD_MCP=0` 可关。
 - 鉴权复用平台 JWT：客户端在 MCP 配置里加请求头 `Authorization: Bearer <登录 token>`，工具按该用户的项目权限执行。
 - 18 个工具：projects_list / project_users_list / cases_list / case_get / runs_list / run_get / case_run / flow_run / case_create / case_delete / ai_usage / **app_map_upsert**（合并写入应用地图，源码分析 Skill 的上传通道）/ **browser_open · browser_state · browser_act · browser_screenshot · browser_sessions · browser_close**（受控浏览器会话：外部 agent 出脑子、平台出手，动作仅限白名单 goto/click/fill/expect_text/click_xy/drag/save，会话独占线程、空闲 30 分钟自动回收、每用户限 2 个/全局限 8 个）；管理面（用户/模型配置）不暴露。
-- 系统设置页「MCP 接入」一键复制完整配置：内含**每个用户自己的长时效专用令牌**（10 年有效、不受登录过期与服务重启影响，权限跟随账号；修改密码后全部令牌自动吊销、重新生成即可）。
+- 系统设置页「MCP 接入」一键复制完整配置：内含**每个用户自己的长时效专用令牌**（10 年有效、不受登录过期与服务重启影响，权限跟随账号但**仅限 /mcp 服务，不能当登录令牌调 REST 接口**；修改密码后全部令牌自动吊销、重新生成即可）。
 - 接入地址优先取 `TD_PUBLIC_URL`（反向代理场景），未配置时取请求 Host；开发环境经 Vite 代理（/mcp 已配转发）。
 - 注意：客户端所在机器若开有系统代理（Clash 等），需让 localhost 直连（Cursor 等对 localhost 默认直连；Python 客户端设 `NO_PROXY=localhost,127.0.0.1`）。
 
@@ -161,13 +165,13 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 | 认证 | `POST /auth/login` · `GET /auth/me` · `POST/GET /auth/users` · `PUT /auth/password` · `PUT /auth/users/{uid}/password` |
 | 项目 | `GET/POST /projects` · `PUT/DELETE /projects/{pid}` · `GET/POST /projects/{pid}/envs`（一项目仅一条）· `PUT/DELETE .../envs/{eid}` · `GET/POST /projects/{pid}/users` · `PUT/DELETE .../users/{uid}` · `POST .../users/import` · `GET/POST /projects/{pid}/members` · `DELETE .../members/{uid}` |
 | 用例 | `GET/POST /projects/{pid}/cases` · `POST /projects/{pid}/cases/import-assets`（HAR/Postman）· `GET/PUT/DELETE /cases/{cid}` · `POST /cases/{cid}/copy` |
-| 执行 | `POST /runs/cases/{cid}/run` · `POST /runs/plans/{pid}/run`（均立即返回 running 记录，后台执行、前端轮询进度；MCP 的 case_run 保持同步等待）· `GET /runs` · `GET /runs/{rid}`（含 tokens 消耗） · `GET /runs/{rid}/export` · `GET /runs/export.csv` |
+| 执行 | `POST /runs/cases/{cid}/run` · `POST /runs/plans/{pid}/run`（均立即返回 running 记录，后台执行、前端轮询进度；MCP 的 case_run 保持同步等待）· `POST /runs/{rid}/cancel` · **`POST /runs/{rid}/resume`**（失败的 AI 用例断点续跑）· `GET /runs` · `GET /runs/{rid}`（含 tokens 消耗） · `GET /runs/{rid}/export` · `GET /runs/export.csv` |
 | 流程 | `GET/POST /flows` · `GET/PUT/DELETE /flows/{fid}` · `POST /flows/{fid}/run` · `GET /flows/{fid}/runs` · `GET /flows/runs/{rid}/detail` |
 | 计划 | `GET/POST /plans` · `PUT/DELETE /plans/{pid}` |
 | Git | `GET/POST /integrations/git/repos` · `DELETE .../repos/{rid}` · `GET /integrations/git/commits` · `POST /integrations/git/webhook/{secret}` |
-| AI | `POST /ai/gen-from-commits` · `POST /ai/gen-from-text` · `POST /ai/analyze-run/{rid}` · `GET /ai/usage` · `GET /ai/regression-advice` |
+| AI | `POST /ai/gen-from-commits` · `POST /ai/gen-from-text` · **`POST /ai/draft-design`**（AI 起草测试设计） · `POST /ai/analyze-run/{rid}` · `GET /ai/usage`（admin） · `GET /ai/regression-advice` |
 | 设置 | `GET/POST /settings/notify` · `PUT/DELETE /settings/notify/{cid}` · `POST /settings/notify/{cid}/test` · `GET/POST /settings/llm` · `PUT/DELETE /settings/llm/{id}` · `POST /settings/llm/{id}/activate` · `POST /settings/llm/test` · `POST /settings/llm/models` |
-| 录制 | `POST /cases/ui-record/start` · `GET /cases/ui-record/{sid}/frame`（轮询兜底）· **`WS /cases/ui-record/{sid}/stream`**（Screencast 推流，`?token=` 鉴权）· `POST /cases/ui-record/{sid}/cmd` · `POST /cases/ui-record/{sid}/cancel-ai` · `GET /cases/ui-record/{sid}` |
+| 录制 | `POST /cases/ui-record/start` · `GET /cases/ui-record/{sid}/frame`（轮询兜底）· **`WS /cases/ui-record/{sid}/stream`**（Screencast 推流，`?token=` 鉴权）· `POST /cases/ui-record/{sid}/cmd` · `POST /cases/ui-record/{sid}/cancel-ai` · **`POST /cases/ui-record/{sid}/steer-ai`**（AI 代劳运行中插话）· `GET /cases/ui-record/{sid}` |
 | 应用地图 | `POST /projects/{pid}/app-map/scan`（可多角色 `user_ids`）· `GET /projects/{pid}/app-map` · `POST /projects/{pid}/app-map/upsert`（合并写入）· `DELETE /projects/{pid}/app-map` |
 | MCP | `STREAMABLE-HTTP /mcp`（工具：项目/用户/用例查询、用例与流程执行、执行明细、创建删除用例、用量统计、地图 upsert、浏览器会话六件套） |
 | 健康 | `GET /health` |
@@ -188,7 +192,10 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 | `TD_MCP` | `1` | 设 0 关闭 MCP 服务（/mcp 端点与工具） |
 | `TD_PUBLIC_URL` | 未设 | 平台对外访问地址（如 `https://td.corp.com`）：MCP 配置里的接入 URL 优先用它，避免反向代理改写 Host 导致地址错误 |
 | `TD_KEEP_DAYS` | `30` | 截图与执行录像保留天数 |
-| `TD_MODEL_CONTEXT_SIZE` | `65536` | 模型上下文窗口声明（token）：压缩阈值=0.8×此值，长执行更早压缩历史省 token；设 0 用模型默认（通常 128k） |
+| `TD_MODEL_CONTEXT_SIZE` | `65536` | 模型上下文窗口声明（token）：压缩阈值=0.3×此值，长执行更早压缩历史省 token；设 0 用模型默认（通常 128k） |
+| `TD_AI_MODEL_TIMEOUT` | `300` | AI 单次模型请求超时秒数（openai SDK 默认 600s，多档回退链叠加会拖太久） |
+| `TD_AI_MAX_SECONDS` | `3600` | 单次 AI 执行总时长墙钟（秒）：取消不打断模型推理，靠步间检查兜住整体时长 |
+| `TD_VERIFY_TLS` | `0` | 设 1 对被测系统启用 HTTPS 证书校验（默认关闭：内网自签证书常见） |
 | `TD_VIDEO_SPEED` | `4` | 执行录像倍速压缩倍数：落盘后立即抽帧转码（限 8fps），时长与体积同比例下降；设 0/1 关闭保留原片。ffmpeg 取系统 PATH 或 imageio-ffmpeg 自带构建，都不可用时保留原片 |
 | `TD_SHOT_DIFF` | `1` | 设为 0 关闭流程截图基线对比 |
 | `TD_SHOT_DIFF_PCT` | `2` | 截图与基线的差异阈值（百分比，超过判失败） |
@@ -219,7 +226,12 @@ docs/                  本文档与交互原型（docs/test-platform-ui/index.ht
 ## 9. 测试
 
 ```bash
-cd backend && .venv/Scripts/python -m pytest tests -q     # 107 个单元/接口测试
+cd backend && .venv/Scripts/python -m pytest tests -q     # 156 个单元/接口测试
+# 行为级评估（pi evals 思路的领域版）：固定任务集端到端跑引擎，判定只认被测系统服务端状态
+.venv/Scripts/python -m evals.runner                        # fake 模式（脚本模型，CI 也跑）
+.venv/Scripts/python -m evals.runner --mode real \
+  --base-url <API地址> --key <KEY> --model <模型> --rounds 3 # 真模型行为基准（调参/换模型前后对比）
+.venv/Scripts/python -m evals.runner --baseline evals/reports/<文件>.json   # 与历史报告对比
 # E2E（需先起后端与 mock 被测系统 9001）：
 tests/e2e.py e2e_m2.py e2e_m3.py e2e_m5.py e2e_flow.py
 # 假 LLM 服务器（AI 引擎联调用）：uvicorn tests.fake_llm:app --port 9111
@@ -233,7 +245,7 @@ tests/e2e.py e2e_m2.py e2e_m3.py e2e_m5.py e2e_flow.py
 |---|---|
 | `backend/testdeck.db` | **全部运行数据**：模型 API Key 与告警 webhook（**静态加密存储**，密钥源自 TD_SECRET）、账号密码哈希、执行记录与被测系统响应 |
 | `backend/.secret_key`、`backend/.token_epoch` | JWT 签名密钥（未配 TD_SECRET 时自动生成）与令牌版本（已 gitignore） |
-| `backend/static/` | 执行截图与录像（可能含被测系统页面与业务数据）——**已加登录鉴权**：浏览器走登录时下发的 `td_token` Cookie，程序访问带 `Authorization: Bearer` |
+| `backend/static/` | 执行截图与录像（可能含被测系统页面与业务数据）——**已加登录 + 项目归属鉴权**：浏览器走登录时下发的 `td_token` Cookie，程序访问带 `Authorization: Bearer`；member 只能取自己项目的产物（文件名 → 执行记录/流程 → 项目），admin 全放行 |
 | `backend/.venv/`、`frontend/node_modules/`、`frontend/dist/` | 本地产物/构建产物 |
 
 **代码中允许公开的敏感字样**（均为示例或带安全说明）：

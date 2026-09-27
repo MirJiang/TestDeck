@@ -6,6 +6,12 @@ import httpx
 VAR_RE = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 
+def verify_tls() -> bool:
+    """对被测系统启用 HTTPS 证书校验：默认关闭（内网自签证书常见），设 TD_VERIFY_TLS=1 开启。"""
+    from .. import config
+    return str(config.get("TD_VERIFY_TLS", "") or "").strip().lower() in ("1", "true", "yes")
+
+
 def substitute(text: str, variables: dict) -> str:
     """把 ${name} 替换为变量值；未知变量原样保留。"""
     if not isinstance(text, str):
@@ -93,7 +99,7 @@ def run_case(case, env, timeout: float = 15.0) -> dict:
     detail, pass_n, fail_n = [], 0, 0
     t0 = time.time()
 
-    with httpx.Client(timeout=timeout, verify=False, trust_env=False) as client:
+    with httpx.Client(timeout=timeout, verify=verify_tls(), trust_env=False) as client:
         for i, step in enumerate(case.steps or [], 1):
             url = substitute(step.get("url", ""), variables)
             if base and url.startswith("/"):

@@ -44,6 +44,44 @@ from .ui_runner import STATIC_DIR
 ALLOWED_ACTIONS = ("goto", "click", "dblclick", "fill", "fill_many", "expect_text",
                    "click_xy", "click_xy_many", "drag", "scroll", "save")
 
+# 测试点验收：同一测试点的断言最多引擎执行次数（首次 + AI 复核纠正后的重试）。
+# 通过只能由断言产生；AI 只能把"未通过"定性为缺陷(defect)或环境阻塞(blocked)。
+MAX_VERIFY_ATTEMPTS = 3
+
+
+def _max_seconds() -> int:
+    """单次 AI 执行的总时长墙钟（TD_AI_MAX_SECONDS，默认 3600）：取消不打断模型推理，
+    步数检查也在步间——没有墙钟时回退链 N 档 × 慢推理可把执行拖到小时级。"""
+    try:
+        return max(60, int(config.get("TD_AI_MAX_SECONDS") or 3600))
+    except (TypeError, ValueError):
+        return 3600
+
+
+# ---------- 运行中插话（steering）：与取消同构的 run_id 注册表 ----------
+# 文本在下一次工具结果末尾注入（不打断当前模型调用，也不插进工具调用与结果之间），
+# 模型在下一个决策点看到并调整方向。借鉴编码 agent 的 steer 语义做领域适配。
+_steers: dict[str, list[str]] = {}
+_steers_lock = threading.Lock()
+
+
+def steer(run_id: str, text: str) -> int:
+    """向运行中的 AI 执行插话（如录制 AI 代劳时"停，改用手动"）。返回当前排队条数。"""
+    text = (text or "").strip()
+    if not text or not run_id:
+        return 0
+    with _steers_lock:
+        _steers.setdefault(run_id, []).append(text[:500])
+        return len(_steers[run_id])
+
+
+def drain_steers(run_id: str) -> list[str]:
+    """取走并清空该执行的待注入插话（工具包装层在每个动作结果里调用）。"""
+    if not run_id:
+        return []
+    with _steers_lock:
+        return _steers.pop(run_id, [])
+
 
 class Verdict(BaseModel):
     """done：目标达成或确认无法继续时给出的测试结论（结构化输出）。"""
@@ -75,6 +113,19 @@ _SYSTEM = (
     "- 目标达成或确认无法继续时，调用 GenerateStructuredOutput 给出结论："
     "passed（布尔）与 reason（一句话总结）。\n"
     "- 只做与测试目标相关的操作，不要偏离目标随意浏览。"
+)
+
+# 测试设计形态（用例带预设测试点）的追加工作流：AI 负责"做"，引擎负责"判"
+_POINTS_SYSTEM = (
+    "\n\n测试点验收工作流（本用例带预设测试设计）：\n"
+    "- 逐个测试点完成其「操作意图」，到达可验证状态后调用 browser_verify——断言由引擎执行，"
+    "结果客观，与你的判断无关。\n"
+    "- verify 未通过 ≠ 测试失败，先判断原因：页面未就绪/被弹窗遮挡/操作没到位 → 纠正状态后"
+    "重新 verify（同一测试点最多 3 次）；确认是被测系统的问题（功能缺陷/数据不对）→ "
+    "browser_conclude 定性 defect；环境或前置问题无法验证 → 定性 blocked。\n"
+    "- 不得为了让断言通过而绕过测试意图，也不得把被测系统的问题说成 blocked。\n"
+    "- 所有测试点处理完（通过或已定性）后调用 GenerateStructuredOutput 收尾；"
+    "遗漏未验证的测试点会在收尾时被引擎兜底判定。"
 )
 
 # 压缩摘要的测试状态卡片（替代通用"续作摘要"）：字段即模板占位符，缺一会 KeyError，
@@ -109,7 +160,8 @@ class Harness:
 
     def __init__(self, page, goal: str, variables: dict, run_id: str, shot_tag: str,
                  on_step, engine: str, page_map: str, project_id: str,
-                 vision: bool, max_actions: int, map_keys: set | None = None):
+                 vision: bool, max_actions: int, map_keys: set | None = None,
+                 points: list | None = None, api_base: str = ""):
         self.page = page
         self.goal = goal
         self.variables = dict(variables or {})
@@ -122,12 +174,15 @@ class Harness:
         self.vision = vision
         self.max_actions = max_actions
         self.map_keys = map_keys or set()   # 地图已收录页面 key（页面文字省略判定）
+        self.points = list(points or [])    # 测试设计：[{name, intent, asserts}]，空 = 旧形态（AI 自判）
+        self.api_base = api_base or ""      # expect_api 的相对路径基准（环境 Base URL）
 
         self.detail: list[dict] = []
         self.saved: dict[str, str] = {}
         self.pass_n = self.fail_n = 0
         self.idx = 0
         self.t0 = time.time()
+        self.deadline = self.t0 + _max_seconds()   # 总时长墙钟，步间检查
         self.stop = ""                 # 非空 = 取消/熔断/超限，工具返回 INTERRUPTED 结束 reply
         self.stop_kind = ""            # cancel | breaker | limit | error
         self.last_fail_key, self.same_fail = None, 0
@@ -138,6 +193,11 @@ class Harness:
         self._sel_by_h: dict[str, str] = {}  # 句柄 → selector（动作解析用）
         self._handle_n = 0
         self.calls: SimpleQueue = SimpleQueue()   # (fn, args, future) → 队列线程执行
+        # 测试点验收状态：name -> {status: pending|passed|failed|blocked, attempts, results, note}
+        self.point_state: dict[str, dict] = {
+            p.get("name", f"测试点{i+1}"): {"status": "pending", "attempts": 0,
+                                            "results": [], "note": ""}
+            for i, p in enumerate(self.points)}
 
     # ---------- 跨线程桥接 ----------
 
@@ -173,6 +233,11 @@ class Harness:
         # 执行前检查取消（与旧循环语义一致：步与步之间）
         if self.run_id and _q.is_cancelled(self.run_id):
             self._interrupt("cancel", "已手动取消")
+            return False, self.stop
+
+        # 总时长墙钟：模型推理期间无法中断，靠步间检查兜住整体时长
+        if time.time() > self.deadline:
+            self._interrupt("limit", f"超过最大执行时长（{_max_seconds() // 60} 分钟），已终止")
             return False, self.stop
 
         # A2 执行比对信号：地图（期望基线）按钮缺失 → 本步记 warning（不判失败）
@@ -262,6 +327,130 @@ class Harness:
         except Exception:
             pass
 
+    def note_steer(self, text: str):
+        """把已注入的插话记到刚执行完的步骤明细上（执行记录可见 AI 是在哪一步被改道的）。"""
+        if text and self.detail:
+            self.detail[-1]["steer"] = text[:200]
+            self._emit()
+
+    # ---------- 测试点验收（引擎判定；通过只能由断言产生） ----------
+
+    def _point(self, name: str):
+        return next((p for p in self.points if p.get("name") == name), None)
+
+    def verify_point(self, name: str) -> dict:
+        """引擎执行某测试点的断言（队列线程，Playwright 亲和）。返回给模型的客观结果。"""
+        p = self._point(name)
+        st = self.point_state.get(name)
+        if p is None or st is None:
+            return {"ok": False, "error": f"测试点不存在：{name}（可用：{list(self.point_state)}）"}
+        if st["status"] == "passed":
+            return {"ok": True, "already": True, "results": st["results"],
+                    "note": "该测试点已通过"}
+        if st["attempts"] >= MAX_VERIFY_ATTEMPTS:
+            return {"ok": False, "exhausted": True,
+                    "note": f"该测试点已达 {MAX_VERIFY_ATTEMPTS} 次验证上限，请调用 browser_conclude 定性"}
+        st["attempts"] += 1
+        from .assertions import verify_assertions
+        http = None
+        if any((a.get("type") == "expect_api") for a in p.get("asserts") or []):
+            import httpx
+            from .runner import verify_tls
+            http = httpx.Client(timeout=15, verify=verify_tls(), trust_env=False)
+        try:
+            results = verify_assertions(p.get("asserts") or [], page=self.page,
+                                        variables=self.variables, api_base=self.api_base,
+                                        http=http)
+        finally:
+            if http is not None:
+                http.close()
+        st["results"] = results
+        ok = bool(results) and all(r["ok"] for r in results)
+        reason = "；".join(("✓" if r["ok"] else "✗") + r["assert"] +
+                           (f"（{r['reason']}）" if r["reason"] else "") for r in results) or "（无断言）"
+        self.idx += 1
+        entry = {"idx": self.idx, "action": "verify", "target": name,
+                 "pass": ok, "reason": reason[:500], "ms": 0,
+                 "url": self.page.url if hasattr(self.page, "url") else "",
+                 "selector": "", "value": ""}
+        if ok:
+            st["status"] = "passed"
+            self.pass_n += 1
+        else:
+            st["status"] = "failed"
+            self.fail_n += 1
+        self.detail.append(entry)
+        self._emit()
+        return {"ok": ok, "results": results, "attempts": st["attempts"]}
+
+    def conclude_point(self, name: str, verdict: str, reason: str) -> dict:
+        """AI 对未通过的测试点定性：defect=被测系统缺陷；blocked=环境/前置问题导致无法验证。
+        只影响展示与失败原因，不影响判定不变量：passed 永远来自引擎断言。"""
+        p = self._point(name)
+        st = self.point_state.get(name)
+        if p is None or st is None:
+            return {"ok": False, "error": f"测试点不存在：{name}"}
+        if st["status"] == "passed":
+            return {"ok": False, "error": "该测试点已通过，无需定性"}
+        verdict = (verdict or "").strip().lower()
+        if verdict not in ("defect", "blocked"):
+            return {"ok": False, "error": "verdict 只能是 defect（被测系统缺陷）或 blocked（环境/前置问题）"}
+        st["status"] = "failed" if verdict == "defect" else "blocked"
+        st["note"] = (reason or "")[:300]
+        self.idx += 1
+        self.detail.append({"idx": self.idx, "action": "conclude", "target": name,
+                            "pass": False, "ms": 0, "url": "", "selector": "", "value": "",
+                            "reason": f"AI 定性：{'被测系统缺陷' if verdict == 'defect' else '环境/前置问题'}"
+                                      f"——{st['note'] or '（未说明）'}"})
+        self._emit()
+        return {"ok": True}
+
+    def finalize_points(self):
+        """执行收尾兜底：模型没验证/没定性的测试点，引擎补跑一次断言（判定不依赖模型自觉）。"""
+        from .assertions import verify_assertions
+        for name, st in self.point_state.items():
+            if st["status"] in ("passed", "blocked") or (
+                    st["status"] == "failed" and st["attempts"] > 0):
+                continue   # 已通过 / 已定性 / 已有失败事实：不再补跑
+            p = self._point(name)
+            http = None
+            if any((a.get("type") == "expect_api") for a in p.get("asserts") or []):
+                import httpx
+                from .runner import verify_tls
+                http = httpx.Client(timeout=15, verify=verify_tls(), trust_env=False)
+            try:
+                results = verify_assertions(p.get("asserts") or [], page=self.page,
+                                            variables=self.variables, api_base=self.api_base,
+                                            http=http)
+            except Exception as e:
+                results = [{"ok": False, "assert": "兜底验证", "reason": str(e)[:200]}]
+            finally:
+                if http is not None:
+                    http.close()
+            st["results"] = results
+            st["attempts"] += 1
+            ok = bool(results) and all(r["ok"] for r in results)
+            reason = "；".join(("✓" if r["ok"] else "✗") + r["assert"] +
+                               (f"（{r['reason']}）" if r["reason"] else "") for r in results) or "（无断言）"
+            st["status"] = "passed" if ok else "failed"
+            if not ok:
+                st["note"] = "模型未验证，收尾兜底判定" if st["attempts"] == 1 else st["note"]
+            self.idx += 1
+            self.detail.append({"idx": self.idx, "action": "verify", "target": name,
+                                "pass": ok, "reason": ("收尾兜底：" + reason)[:500], "ms": 0,
+                                "url": "", "selector": "", "value": ""})
+            if ok:
+                self.pass_n += 1
+            else:
+                self.fail_n += 1
+        if self.point_state:
+            self._emit()
+
+    def points_out(self) -> list[dict]:
+        return [{"name": n, "status": s["status"], "attempts": s["attempts"],
+                 "asserts": s["results"], "note": s["note"]}
+                for n, s in self.point_state.items()]
+
     def shot_b64(self) -> str | None:
         """视口截图（jpeg base64），失败（如 Lightpanda 不支持）返回 None。"""
         try:
@@ -330,17 +519,34 @@ class Harness:
             status = "passed" if ok else "failed"
         elif self.stop_kind == "cancel":
             summary, status = "用户取消", "failed"
+        elif self.stop:
+            summary, status = self.stop, "failed"
+        elif self.idx >= self.max_actions:
+            summary, status = f"超过最大步数 {self.max_actions}", "failed"
         else:
-            summary = self.stop or f"超过最大步数 {self.max_actions}"
-            status = "failed"
+            # 无结论且未触发中断：模型跑完 reply 但没调结构化输出工具，别误报成"超过最大步数"
+            summary, status = "模型未给出结论（未调用结构化输出工具）", "failed"
         if status == "failed" and summary != "用户取消":
             hint = _model_hint()
             if hint:
                 summary += f"；建议：{hint}"
-        return {"status": status, "pass_n": self.pass_n, "fail_n": self.fail_n,
-                "duration": round(time.time() - self.t0, 2), "detail": self.detail,
-                "saved": self.saved, "summary": summary,
-                "brain": "agentscope", "usage": list(self.usage)}
+        out = {"status": status, "pass_n": self.pass_n, "fail_n": self.fail_n,
+               "duration": round(time.time() - self.t0, 2), "detail": self.detail,
+               "saved": self.saved, "summary": summary,
+               "brain": "agentscope", "usage": list(self.usage)}
+        if self.point_state:
+            # 测试设计形态：判定权在引擎断言。done(passed) 降级为"操作完成"声明——
+            # 状态与结论以测试点为准，通过只能由断言产生（AI 定性只解释失败，不能改判通过）
+            pts = self.points_out()
+            n_ok = sum(1 for p in pts if p["status"] == "passed")
+            out["points"] = pts
+            out["status"] = "passed" if n_ok == len(pts) else "failed"
+            bad = [f"{p['name']}（{'环境阻塞' if p['status'] == 'blocked' else '未通过'}）"
+                   for p in pts if p["status"] != "passed"]
+            verdict_txt = f"模型操作结论：{summary[:120]}。" if summary else ""
+            out["summary"] = (f"测试点 {n_ok}/{len(pts)} 通过；未过：{'、'.join(bad) or '无'}。"
+                              + verdict_txt)[:400]
+        return out
 
 
 # ---------- 模型层：llm_configs 对接 + 多模型回退链 ----------
@@ -380,6 +586,10 @@ def build_model_chain(on_usage: Callable[[str, int, int, bool], None] | None = N
         ctx = int(config.get("TD_MODEL_CONTEXT_SIZE") or 65536)
     except (TypeError, ValueError):
         ctx = 65536
+    try:
+        model_timeout = max(30, int(config.get("TD_AI_MODEL_TIMEOUT") or 300))
+    except (TypeError, ValueError):
+        model_timeout = 300   # 单次模型请求超时（openai SDK 默认 600s，回退链多档叠加会拖到小时级）
     models = []
     for base, key, model in entries:
         kwargs = {"context_size": ctx} if ctx > 0 else {}
@@ -389,27 +599,26 @@ def build_model_chain(on_usage: Callable[[str, int, int, bool], None] | None = N
             stream=False,               # 与旧循环一致：非流式，用量一次性拿到
             max_retries=1,              # 单档快速失败，交给回退链换档
             parameters=OpenAIChatModel.Parameters(temperature=0.1),
+            client_kwargs={"timeout": model_timeout},
             **kwargs,
         ))
     return make_fallback_model(models, on_usage=on_usage)
 
 
 def _thinking_safe_choice(tool_choice, tools):
-    """思考模式模型兼容（B4 实测：DeepSeek 思考模式拒绝 tool_choice="none"/强制函数，400）。
+    """思考模式模型兼容（B4 实测：DeepSeek 思考模式拒绝 tool_choice="none"，400）。
 
     - mode="none"（上下文压缩摘要用）→ 工具与 choice 一并去掉，等价纯文本补全；
-    - mode=函数名（max_iters 收尾强制结构化输出）→ 降级 auto，提示词已明确要求
-      此时调用结构化输出工具；
-    - 其余（None/auto）原样透传。
+    - 其余（None/auto/强制函数名）原样透传——强制结构化输出的降级交给
+      AgentScope generate_structured_output 的策略梯队（forced → auto → no_think
+      → none，触发条件是 BadRequestError；FallbackChatModel 已暴露该异常集）。
+      之前在这里无条件把强制降级成 auto，会让非思考模型的 done 结论失去强制力。
     返回 (tool_choice, tools)。
     """
     mode = getattr(tool_choice, "mode", None) if tool_choice else None
-    if mode is None or mode == "auto":
-        return tool_choice, tools
     if mode == "none":
         return None, None
-    from agentscope.tool import ToolChoice
-    return ToolChoice(mode="auto"), tools    # 强制函数名 → auto（模型层只认 ToolChoice 对象）
+    return tool_choice, tools
 
 
 def make_fallback_model(models: list, on_usage=None):
@@ -424,6 +633,16 @@ def make_fallback_model(models: list, on_usage=None):
 
     class FallbackChatModel(ChatModelBase):
         Parameters = OpenAIChatModel.Parameters
+
+        # 基类这两个方法默认返回空 tuple：不覆盖则重试与"强制结构化输出降级梯队"
+        # （forced → auto → no_think → none，针对思考模式模型 400 拒绝 forced）全部失效
+        @staticmethod
+        def _get_retryable_exceptions() -> tuple:
+            return OpenAIChatModel._get_retryable_exceptions()
+
+        @staticmethod
+        def _get_structured_output_fallback_exceptions() -> tuple:
+            return OpenAIChatModel._get_structured_output_fallback_exceptions()
 
         def __init__(self):
             super().__init__(credential=models[0].credential, model=models[0].model,
@@ -479,6 +698,15 @@ def build_toolkit(h: Harness):
     """注册白名单工具。除这些外 agent 无任何工具（done=结构化输出，look 仅视觉模式）。"""
     from agentscope.tool import FunctionTool, Toolkit
 
+    def _steer_note() -> str:
+        """取走排队中的用户插话，拼进本次工具结果（模型在下一个决策点看到并改道）。"""
+        ss = drain_steers(h.run_id)
+        if not ss:
+            return ""
+        text = "；".join(ss)
+        h.note_steer(text)
+        return f"\n\n【用户中途指示（优先于原目标执行）】{text}"
+
     async def _run(action: str, think: str, params: dict, feedback: str = "") -> Any:
         """在队列线程执行动作，返回工具响应（含最新页面状态）。"""
         fut = h.dispatch(h.execute, action, think, params)
@@ -489,7 +717,7 @@ def build_toolkit(h: Harness):
         text = f"{'成功' if ok else '失败'}：{reason}"
         if feedback:
             text += f"\n{feedback}"
-        return _tool_response(f"{text}\n\n{state}")
+        return _tool_response(f"{text}\n\n{state}" + _steer_note())
 
     # state_text 也要走队列线程（page.evaluate 有线程亲和性）
     async def _state_text():
@@ -535,7 +763,7 @@ def build_toolkit(h: Harness):
                 break
         if h.stop:
             return _tool_response("\n".join(outs) + f"\n执行已终止：{h.stop}", interrupted=True)
-        return _tool_response("\n".join(outs) + "\n\n" + await _state_text())
+        return _tool_response("\n".join(outs) + "\n\n" + await _state_text() + _steer_note())
 
     async def browser_expect_text(think: str, value: str):
         """断言页面包含指定文字，不包含则该步失败。用于验证操作结果。"""
@@ -565,7 +793,7 @@ def build_toolkit(h: Harness):
                 break
         if h.stop:
             return _tool_response("\n".join(outs) + f"\n执行已终止：{h.stop}", interrupted=True)
-        return _tool_response("\n".join(outs) + "\n\n" + await _state_text())
+        return _tool_response("\n".join(outs) + "\n\n" + await _state_text() + _steer_note())
 
     async def browser_drag(think: str, x: int, y: int, x2: int, y2: int):
         """从 (x,y) 按住拖拽到 (x2,y2)，自动分步模拟人手轨迹。用于滑块验证码：起点=手柄中心，终点=缺口位置。"""
@@ -581,18 +809,56 @@ def build_toolkit(h: Harness):
         """把页面上看到的业务值（单号/金额等）存为变量 ${name}，供后续步骤引用。"""
         return await _run("save", think, {"name": name, "value": value})
 
+    async def browser_verify(think: str, point: str):
+        """验证测试点：引擎执行该测试点预设的断言（客观判定，结果不依赖你的判断）。
+        到达该点的可验证状态后调用；同一测试点最多验证 3 次。"""
+        if not h.point_state:
+            return _tool_response("本用例没有预设测试点，直接完成目标即可")
+        r = await asyncio.wrap_future(h.dispatch(h.verify_point, point))
+        if r.get("error"):
+            return _tool_response(r["error"])
+        if r.get("already"):
+            return _tool_response(f"测试点「{point}」已通过，无需重复验证")
+        if r.get("exhausted"):
+            return _tool_response(f"测试点「{point}」已达验证上限，请调用 browser_conclude 定性")
+        lines = ["；".join((("✓" if a["ok"] else "✗") + a["assert"] +
+                            (f"（{a['reason']}）" if a["reason"] else "")) for a in r["results"])]
+        head = ("验证通过 ✓" if r["ok"] else
+                f"断言未通过（客观事实，还不是最终判定）：\n{lines[0]}")
+        guide = "" if r["ok"] else (
+            "\n请判断未通过的原因：若是页面未就绪/被遮挡/你的操作未到达正确状态，纠正后重新调用本工具；"
+            "若确认是被测系统的问题，调用 browser_conclude(point, verdict=\"defect\") 定性；"
+            "若是环境/前置数据问题无法验证，定性 \"blocked\"。不要为了通过而绕过测试意图。")
+        return _tool_response(f"{head}（第 {r['attempts']}/{MAX_VERIFY_ATTEMPTS} 次验证）"
+                              f"{guide}\n\n" + await _state_text() + _steer_note())
+
+    async def browser_conclude(think: str, point: str, verdict: str, reason: str):
+        """对未通过的测试点给出定性结论。verdict 只能是：
+        defect（被测系统缺陷：功能不符合预期/数据显示错误）或
+        blocked（环境或前置问题导致无法验证：服务不可用/账号被锁/前置数据缺失）。
+        reason 一句话说清依据。注意：已通过的测试点不能改判。"""
+        if not h.point_state:
+            return _tool_response("本用例没有预设测试点")
+        r = await asyncio.wrap_future(h.dispatch(h.conclude_point, point, verdict, reason))
+        if r.get("error"):
+            return _tool_response(r["error"])
+        return _tool_response(f"已记录对「{point}」的定性：{verdict}——{reason[:200]}。继续处理其余测试点，"
+                              "全部处理完后调用 GenerateStructuredOutput 收尾。")
+
     async def browser_look(think: str):
         """拍摄当前视口截图并返回（附最新页面状态）。需要看图定位（验证码/图形元素）时使用。"""
         fut = h.dispatch(h.shot_b64)
         img = await asyncio.wrap_future(fut)
         state = await _state_text()
         if not img:
-            return _tool_response(f"截图不可用（当前浏览器引擎不支持），依据文字状态操作。\n{state}")
-        return _tool_response(state, image_b64=img)
+            return _tool_response(f"截图不可用（当前浏览器引擎不支持），依据文字状态操作。\n{state}" + _steer_note())
+        return _tool_response(state + _steer_note(), image_b64=img)
 
     tools = [browser_goto, browser_click, browser_dblclick, browser_fill, browser_fill_many,
              browser_expect_text, browser_click_xy, browser_click_xy_many, browser_drag,
              browser_scroll, browser_save]
+    if h.points:
+        tools += [browser_verify, browser_conclude]
     if h.vision:
         tools.append(browser_look)
     return Toolkit(tools=[FunctionTool(f) for f in tools])
@@ -602,11 +868,15 @@ def build_toolkit(h: Harness):
 
 def run_brain(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STEPS,
               run_id: str = "", shot_tag: str = "ai", on_step=None, engine: str = "",
-              page_map: str = "", project_id: str = "", map_keys: set | None = None) -> dict:
+              page_map: str = "", project_id: str = "", map_keys: set | None = None,
+              resume: dict | None = None, points: list | None = None,
+              api_base: str = "") -> dict:
     """AgentScope 驱动的同步入口。须在执行队列线程调用（Playwright 线程亲和性）。
 
     返回结构与 ai_drive 完全一致：{status, pass_n, fail_n, duration, detail, saved, summary}，
     额外带 brain="agentscope" 与 usage（供 llm_logs 记账）。
+    resume：断点续跑上下文（{start_url, done_summary, saved}）——注入"已完成步骤/变量，
+    从断点继续"的先验，避免长执行失败后从零重来（浏览器会话与登录态需重建）。
     """
     if not A.llm_available():
         return {"status": "failed", "pass_n": 0, "fail_n": 1, "duration": 0.0,
@@ -615,20 +885,25 @@ def run_brain(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STE
                                       "或在 .env 配置 TD_LLM_BASE_URL / TD_LLM_KEY", "ms": 0}],
                 "saved": {}, "summary": "未配置 LLM"}
 
+    resume = resume or {}
+    merged_vars = dict(variables or {})
+    merged_vars.update(resume.get("saved") or {})   # 断点前 save 的业务单号等变量直接可用
+
     def _on_usage(model, pt, ct, ok):
         try:
             A._log_usage("agent-step", pt, ct, ok, model=model, run_id=run_id)
         except Exception:
             pass
 
-    h = Harness(page, goal, variables, run_id, shot_tag, on_step, engine, page_map,
+    h = Harness(page, goal, merged_vars, run_id, shot_tag, on_step, engine, page_map,
                 project_id, vision=A.vision_enabled(), max_actions=max_steps,
-                map_keys=map_keys)
+                map_keys=map_keys, points=points, api_base=api_base)
     result_box: dict = {}
 
     def _agent_thread_main():
         try:
-            asyncio.run(_agent_main(h, goal, variables, max_steps, result_box, _on_usage))
+            asyncio.run(_agent_main(h, goal, merged_vars, max_steps, result_box, _on_usage,
+                                    resume))
         except BaseException as e:   # 异常也要让队列线程的 pump 退出
             result_box.setdefault("error", f"{type(e).__name__}: {e}"[:300])
         finally:
@@ -639,6 +914,8 @@ def run_brain(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STE
     t.start()
     h.pump()          # 队列线程：泵送 Playwright 调用直到 agent 结束
     t.join()
+    drain_steers(run_id)   # 执行已结束：未消费的插话直接丢弃，防止注册表泄漏
+    h.finalize_points()    # 测试点兜底判定（队列线程，Playwright 亲和）：模型没验证的点引擎补跑断言
 
     if "error" in result_box:
         h._interrupt("error", f"Agent 执行异常：{result_box['error']}")
@@ -646,7 +923,7 @@ def run_brain(page, goal: str, variables: dict, max_steps: int = DEFAULT_MAX_STE
 
 
 async def _agent_main(h: Harness, goal: str, variables: dict, max_steps: int,
-                      result_box: dict, on_usage):
+                      result_box: dict, on_usage, resume: dict | None = None):
     """agent 线程的事件循环主体：构建模型/工具/Agent 并跑一轮 reply。"""
     from agentscope.agent import Agent, ContextConfig, ReActConfig
     from agentscope.message import UserMsg
@@ -664,6 +941,8 @@ async def _agent_main(h: Harness, goal: str, variables: dict, max_steps: int,
     # 只有 ALLOW 规则放行的注册工具可执行，其余一律 DENY（不询问、不挂起）。
     # done 走内置 GenerateStructuredOutput（只读工具，走 read-only 快速放行）。
     allowed = [f"browser_{a}" for a in ALLOWED_ACTIONS] + (["browser_look"] if h.vision else [])
+    if h.points:
+        allowed += ["browser_verify", "browser_conclude"]
     perm = PermissionContext(mode=PermissionMode.DONT_ASK)
     for name in allowed:
         perm.allow_rules[name] = [PermissionRule(
@@ -673,6 +952,22 @@ async def _agent_main(h: Harness, goal: str, variables: dict, max_steps: int,
 
     var_txt = "; ".join(f"${k}={v}" for k, v in (variables or {}).items()) or "无"
     prompt = f"测试目标：{goal}\n可用变量：{var_txt}"
+    if h.points:
+        lines = []
+        for i, p in enumerate(h.points, 1):
+            asserts = "；".join(
+                f"{a.get('type')}(" + ", ".join(f"{k}={v}" for k, v in a.items() if k != "type") + ")"
+                for a in p.get("asserts") or [])
+            lines.append(f"{i}. {p.get('name', '')}｜操作意图：{p.get('intent', '') or '（按目标自行操作）'}"
+                         f"｜验收断言：{asserts or '（无）'}")
+        prompt += "\n\n本次测试的测试点（逐点执行并验证，验收断言由引擎执行）：\n" + "\n".join(lines)
+    if resume and (resume.get("done_summary") or resume.get("saved")):
+        saved_txt = "; ".join(f"${k}={v}" for k, v in (resume.get("saved") or {}).items()) or "无"
+        prompt += (
+            f"\n\n【断点续跑】这是从中断处的继续执行，浏览器与登录态已重置。此前已完成：\n"
+            f"{(resume.get('done_summary') or '（无记录）')[:2000]}\n已保存变量：{saved_txt}\n"
+            "要求：不要重复已完成的业务动作（已创建的单据/已提交的表单不要重建，单号在变量里）；"
+            "若后续步骤需要登录态，先重新登录；从中断处继续完成剩余目标。")
     if h.page_map:
         prompt += f"\n\n{h.page_map}"
     if h.vision:
@@ -689,7 +984,8 @@ async def _agent_main(h: Harness, goal: str, variables: dict, max_steps: int,
                             max_image_num=1, tool_result_limit=12000,
                             summary_schema=_SUMMARY_SCHEMA,
                             summary_template=_SUMMARY_TEMPLATE)
-    agent = Agent(name="testdeck", system_prompt=_SYSTEM, model=model, toolkit=toolkit,
+    system = _SYSTEM + (_POINTS_SYSTEM if h.points else "")
+    agent = Agent(name="testdeck", system_prompt=system, model=model, toolkit=toolkit,
                   state=state, react_config=ReActConfig(max_iters=max(2, max_steps)),
                   context_config=ctx_cfg)
     try:

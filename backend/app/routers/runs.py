@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta
+import secrets
 import time
 import csv
 import io
@@ -25,7 +26,9 @@ class RunIn(BaseModel):
 
 
 def _new_run_id() -> str:
-    return f"R-{int(time.time() * 1000) % 10**9:09d}"
+    # 随机生成：时间戳取模在同毫秒并发触发时会主键冲突，且可预测的 id 会被用于
+    # 枚举 /static 下的他人截图（文件名即 run_id）
+    return f"R-{secrets.token_hex(5)}"
 
 
 def _push_run_detail(run_id: str, detail: list):
@@ -56,17 +59,21 @@ def _create_case_run(c: TestCase, env: Env, trigger_by: str) -> TestRun:
     return run
 
 
-def _case_bg(c: TestCase, env: Env, run: TestRun, loop):
+def _case_bg(c: TestCase, env: Env, run: TestRun, loop, resume: dict | None = None):
     """队列线程任务：执行用例 → 回写执行记录 → 失败告警。异常兜底成失败记录。"""
     import asyncio
 
     def _job():
-        register(run.id)
         try:
-            if c.type == "ui":
+            if is_cancelled(run.id):   # 任务还在排队时就被取消：不再执行
+                r = {"status": "failed", "pass_n": 0, "fail_n": 1, "duration": 0.0,
+                     "detail": [{"idx": 1, "action": "cancel", "target": "", "pass": False,
+                                 "reason": "已在排队阶段取消", "ms": 0}]}
+            elif c.type == "ui":
                 r = run_ui_case(c, env, run.id)
             elif c.type == "ai":
-                r = run_ai_case(c, env, run.id, on_step=lambda d: _push_run_detail(run.id, d))
+                r = run_ai_case(c, env, run.id, on_step=lambda d: _push_run_detail(run.id, d),
+                                resume=resume)
             else:
                 r = run_case(c, env)
         except Exception as e:
@@ -83,6 +90,7 @@ def _case_bg(c: TestCase, env: Env, run: TestRun, loop):
             if db_run:
                 db_run.status, db_run.pass_n, db_run.fail_n = run.status, run.pass_n, run.fail_n
                 db_run.duration, db_run.detail = run.duration, run.detail
+                db_run.saved = r.get("saved") or {}   # AI save 的变量终值：断点续跑的上下文来源
                 db.commit()
         finally:
             db.close()
@@ -114,10 +122,18 @@ async def _exec_flow_sync(f: Flow, env: Env | None, trigger_by: str) -> TestRun:
         register(run.id)
 
         def _exec():
+            if is_cancelled(run.id):   # 排队期间已被取消：不再执行
+                return {"status": "failed", "pass_n": 0, "fail_n": 1, "duration": 0.0,
+                        "detail": [{"idx": 1, "role": "", "type": "", "pass": False,
+                                    "reason": "已在排队阶段取消", "ms": 0}]}
             return run_flow(f, env, run.id, on_step=lambda d: _push_run_detail(run.id, d), cases=cases)
 
         try:
             r = await queued(_exec)
+        except Exception as e:   # 流程抛异常时兜底成失败记录，避免永久卡在 running
+            r = {"status": "failed", "pass_n": 0, "fail_n": 1, "duration": 0.0,
+                 "detail": [{"idx": 1, "role": "", "type": "", "pass": False,
+                             "reason": f"{type(e).__name__}: {e}"[:200], "ms": 0}]}
         finally:
             unregister(run.id)
         run.status, run.pass_n, run.fail_n = r["status"], r["pass_n"], r["fail_n"]
@@ -150,8 +166,10 @@ def execute_plan(plan: TestPlan, env: Env, trigger_by: str = "cron", run_id: str
         total_p = total_f = 0
         t0 = time.time()
         results = []
+        was_cancelled = False
         for cid in plan.case_ids or []:
             if is_cancelled(run.id):   # 计划级取消：当前条目完成后不再继续
+                was_cancelled = True
                 break
             c = db.get(TestCase, cid)
             if not c:
@@ -170,6 +188,7 @@ def execute_plan(plan: TestPlan, env: Env, trigger_by: str = "cron", run_id: str
             db.commit()   # 每完成一条用例就落库，计划执行也能流式看到进度
         for fid in plan.flow_ids or []:
             if is_cancelled(run.id):
+                was_cancelled = True
                 break
             f = db.get(Flow, fid)
             if not f:
@@ -191,12 +210,19 @@ def execute_plan(plan: TestPlan, env: Env, trigger_by: str = "cron", run_id: str
             db.commit()
         run.pass_n, run.fail_n = total_p, total_f
         run.duration = round(time.time() - t0, 2)
-        run.status = "failed" if total_f else "passed"
+        run.status = "failed" if (total_f or was_cancelled) else "passed"
+        if was_cancelled and not results:
+            results = [{"idx": 1, "type": "cancel", "pass": False, "reason": "已取消", "ms": 0}]
+            run.fail_n = 1
         run.detail = results
         db.commit()
         db.refresh(run)
         return run
     finally:
+        try:
+            unregister(run.id)   # 清除取消标记，防止集合无限增长
+        except Exception:
+            pass   # run 尚未创建（入口即抛异常）时无事可清
         db.close()
 
 
@@ -208,7 +234,7 @@ async def run_single(cid: str, body: RunIn, db: Session = Depends(get_db), user:
     check_project_access(c.project_id, user, db)
     env = db.get(Env, body.env_id) if body.env_id else \
         db.query(Env).filter(Env.project_id == c.project_id).first()
-    if not env:
+    if not env or env.project_id != c.project_id:   # 环境必须属于该项目，防跨项目引用
         raise HTTPException(400, "环境不存在")
     run = _create_case_run(c, env, f"user:{user.username}")
     fut = submit(_case_bg(c, env, run, asyncio.get_running_loop()))
@@ -226,7 +252,7 @@ async def run_plan(pid: str, body: RunIn, db: Session = Depends(get_db), user: U
     env = db.get(Env, body.env_id) if body.env_id else (
         db.get(Env, plan.env_id) if getattr(plan, "env_id", "") else
         db.query(Env).filter(Env.project_id == plan.project_id).first())
-    if not env:
+    if not env or env.project_id != plan.project_id:   # 环境必须属于该项目，防跨项目引用
         raise HTTPException(400, "环境不存在")
     loop = asyncio.get_running_loop()
     run_id = _new_run_id()
@@ -262,25 +288,86 @@ def cancel_run(rid: str, db: Session = Depends(get_db), user: User = Depends(cur
     return {"ok": True}
 
 
+def _build_resume(r: TestRun) -> dict:
+    """从失败执行的明细与已存变量构建断点续跑上下文（确定性构建，不调模型）。"""
+    done_lines, last_url = [], ""
+    for d in (r.detail or []):
+        if not isinstance(d, dict):
+            continue
+        act = d.get("action") or d.get("m") or ""
+        if act in ("note", "error", "done", "cancel"):
+            continue
+        mark = "✓" if d.get("pass") else "✗"
+        tgt = str(d.get("target") or d.get("url") or d.get("selector") or "")[:80]
+        done_lines.append(f"{mark} {act} {tgt}".rstrip())
+        u = str(d.get("url") or "")
+        if d.get("pass") and act == "goto" and u.startswith("http"):
+            last_url = u
+    return {"start_url": last_url,
+            "done_summary": "\n".join(done_lines)[-2000:],   # 保留最近的（长执行时开头步骤价值低）
+            "saved": dict(r.saved or {})}
+
+
+@router.post("/{rid}/resume")
+async def resume_run(rid: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    """断点续跑：失败的 AI 用例从断点继续（已完成步骤摘要 + 已存变量注入提示词，起始页用断点页）。"""
+    r = db.get(TestRun, rid)
+    if not r:
+        raise HTTPException(404, "执行记录不存在")
+    _authorize_run(r, user, db)
+    if not r.case_id or r.status not in ("failed",):
+        raise HTTPException(400, "只有失败的用例执行可以断点续跑（计划/流程与 AI 用例外的类型不支持）")
+    c = db.get(TestCase, r.case_id)
+    if not c:
+        raise HTTPException(404, "用例已删除，无法续跑")
+    if c.type != "ai":
+        raise HTTPException(400, "只有 AI 用例支持断点续跑")
+    env = (db.get(Env, r.env_id) if r.env_id else None) or \
+        db.query(Env).filter(Env.project_id == c.project_id).first()
+    if not env or env.project_id != c.project_id:
+        raise HTTPException(400, "环境不存在或已不属于该项目")
+    resume = _build_resume(r)
+    run = _create_case_run(c, env, f"user:{user.username}")
+    fut = submit(_case_bg(c, env, run, asyncio.get_running_loop(), resume=resume))
+    _bg_futs.add(fut)
+    fut.add_done_callback(_bg_futs.discard)
+    out = _run_out(run)
+    out["resumed_from"] = rid
+    return out
+
+
+def _csv_safe(v) -> str:
+    """防 CSV 公式注入：以 = + - @ 开头的单元格前缀单引号，Excel/WPS 打开时不作为公式执行。"""
+    s = str(v if v is not None else "")
+    if s.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + s
+    return s
+
+
 @router.get("/export.csv")
 def export_runs_csv(db: Session = Depends(get_db), user: User = Depends(current_user)):
     from ..perms import accessible_project_ids
+    from sqlalchemy import false as _sa_false
     ids = set(accessible_project_ids(user, db))
     allowed_case = {c.id for c in db.query(TestCase).filter(TestCase.project_id.in_(ids))}
     allowed_plan = {pl.id for pl in db.query(TestPlan).filter(TestPlan.project_id.in_(ids))}
     allowed_flow = {f.id for f in db.query(Flow).filter(Flow.project_id.in_(ids))}
-    q = db.query(TestRun).order_by(TestRun.created_at.desc()).limit(2000)
-    rows = [r for r in q.all()
-            if (r.case_id and r.case_id in allowed_case) or (r.plan_id and r.plan_id in allowed_plan)
-            or (r.flow_id and r.flow_id in allowed_flow)]
+    q = db.query(TestRun).order_by(TestRun.created_at.desc())
+    if allowed_case or allowed_plan or allowed_flow:
+        q = q.filter((TestRun.case_id.in_(allowed_case) | TestRun.plan_id.in_(allowed_plan)
+                      | TestRun.flow_id.in_(allowed_flow)))
+    else:
+        q = q.filter(_sa_false())   # member 无任何可见项目：导出为空
+    rows = q.limit(2000).all()
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["执行ID", "类型", "来源", "环境", "状态", "通过", "失败", "耗时s", "触发", "时间"])
     for r in rows:
         kind = "计划" if r.plan_id else ("流程" if r.flow_id else "用例")
-        w.writerow([r.id, kind, r.plan_name or r.flow_name or r.case_name, r.env_name, r.status,
-                    r.pass_n, r.fail_n, r.duration, r.trigger_by,
-                    r.created_at.strftime("%Y-%m-%d %H:%M")])
+        w.writerow([r.id, kind, _csv_safe(r.plan_name or r.flow_name or r.case_name),
+                    _csv_safe(r.env_name), r.status,
+                    r.pass_n, r.fail_n, r.duration, _csv_safe(r.trigger_by),
+                    r.created_at.strftime("%Y-%m-%d %H:%M") if r.created_at else ""])
     return Response(content="\ufeff" + buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": "attachment; filename=runs.csv"})
 
@@ -290,6 +377,8 @@ def list_runs(plan: str = "", case: str = "", case_kw: str = "", flow: str = "",
               status: str = "", project: str = "", start: str = "", end: str = "",
               page: int = 1, size: int = 20,
               db: Session = Depends(get_db), user: User = Depends(current_user)):
+    page = max(1, page or 1)
+    size = min(max(1, size or 20), 100)   # 分页参数钳制，防负 offset 与超大 size
     q = db.query(TestRun).order_by(TestRun.created_at.desc(), TestRun.id.desc())
     if plan:
         q = q.filter(TestRun.plan_id == plan)
@@ -306,9 +395,7 @@ def list_runs(plan: str = "", case: str = "", case_kw: str = "", flow: str = "",
                      | (TestRun.plan_id.in_(pids)))
     if status:
         q = q.filter(TestRun.status == status)
-    if case:
-        q = q.filter(TestRun.case_id == case)
-    elif case_kw:
+    if case_kw and not case:   # 指定 case 时已精确过滤，无需再按名称模糊匹配
         kw = case_kw.replace("%", "").replace("_", "").strip()
         if kw:
             q = q.filter(TestRun.case_name.like(f"%{kw}%"))

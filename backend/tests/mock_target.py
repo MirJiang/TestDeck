@@ -8,6 +8,7 @@ app = FastAPI()
 async def login(req: Request):
     body = await req.json()
     if body.get("username") == "admin" and body.get("password") == "admin123":
+        _EVAL_STATE["api_login"] = True
         return {"code": 0, "msg": "登录成功", "data": {"token": "tok-123", "uid": 1}}
     return {"code": 4001, "msg": "用户名或密码错误"}
 
@@ -26,7 +27,7 @@ DEMO_PAGE = """
 <html><body style="font-family:sans-serif;padding:40px">
 <h2>运营后台 · 登录</h2>
 <input id="u" placeholder="用户名"> <input id="p" type="password" placeholder="密码">
-<button id="btn" onclick="document.getElementById('msg').innerText='登录成功，欢迎回来'">登 录</button>
+<button id="btn" onclick="fetch('/api/ui-login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.getElementById('u').value,password:document.getElementById('p').value})}).then(r=>r.json()).then(d=>document.getElementById('msg').innerText=d.code===0?'登录成功，欢迎回来':'登录失败，用户名或密码错误')">登 录</button>
 <p id="msg"></p>
 </body></html>
 """
@@ -91,3 +92,48 @@ async def inquiry_result_page():
 <table border="1" cellpadding="6"><tr><th>询价单号</th><th>已收报价</th><th>报价方</th></tr>{rows}</table>
 <p id="msg"></p>
 </body></html>""")
+
+
+# ---------- 行为评估（evals）支撑：服务端可判定的状态 + 询价创建页 ----------
+# 评估的判定不信任模型自己的 done 结论，全部以服务端状态/已存变量为准（客观判定）。
+_EVAL_STATE = {"ui_login": False, "api_login": False}
+
+
+@app.post("/api/ui-login")
+async def ui_login(req: Request):
+    body = await req.json()
+    if body.get("username") == "admin" and body.get("password") == "admin123":
+        _EVAL_STATE["ui_login"] = True
+        return {"code": 0}
+    return {"code": 4001}
+
+
+_CREATE_PAGE = """
+<html><body style="font-family:sans-serif;padding:40px">
+<h2>新建询价单</h2>
+<label>出发城市 <input id="from" placeholder="上海"></label><br><br>
+<label>到达城市 <input id="to" placeholder="北京"></label><br><br>
+<button id="create" onclick="fetch('/api/inquiry/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from:document.getElementById('from').value,to:document.getElementById('to').value})}).then(r=>r.json()).then(d=>document.getElementById('msg').innerText=d.code===0?'已创建询价单 '+d.data.id+'，等待物流报价':'创建失败')">创建询价单</button>
+<p id="msg"></p>
+<p><a href="/page/inquiry/result">查看询价单列表</a></p>
+</body></html>
+"""
+
+
+@app.get("/page/inquiry/create")
+async def inquiry_create_page():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(_CREATE_PAGE)
+
+
+@app.get("/__eval/state")
+async def eval_state():
+    return {"ui_login": _EVAL_STATE["ui_login"], "api_login": _EVAL_STATE["api_login"],
+            "inquiries": len(_INQUIRIES), "inquiry_ids": sorted(_INQUIRIES)}
+
+
+@app.post("/__eval/reset")
+async def eval_reset():
+    _INQUIRIES.clear(); _seq[0] = 100
+    _EVAL_STATE["ui_login"] = _EVAL_STATE["api_login"] = False
+    return {"ok": True}

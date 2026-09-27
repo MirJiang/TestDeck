@@ -15,8 +15,13 @@ def cleanup_screenshots() -> int:
     n = 0
     for pattern in ("*.png", "*.webm"):   # 截图与执行录像一起按期清理
         for f in STATIC_DIR.glob(pattern):
-            if f.stat().st_mtime < cutoff:
-                f.unlink(); n += 1
+            if f.name.startswith("base-"):
+                continue   # base-{flow}-{tag}.png 是视觉回归基线：只在基线不存在时留存，删了会把页面漂移静默立为新基线
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink(); n += 1
+            except OSError:
+                pass
     return n
 
 

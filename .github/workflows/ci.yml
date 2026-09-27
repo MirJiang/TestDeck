@@ -27,6 +27,28 @@ jobs:
         run: ruff check app tests
       - run: python -m pytest tests -q
 
+  evals:
+    name: 行为评估管线（脚本模型）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+      - name: 安装浏览器内核
+        run: python -m playwright install --with-deps chromium
+      # fake 模式 = 固定任务集 + 脚本模型驱动真实浏览器，判定走被测系统服务端状态。
+      # 它挡的是评估管线自身的回归（任务/判定/引擎接线），真模型基准在本地按需跑：
+      #   python -m evals.runner --mode real --base-url ... --key ... --model ...
+      - name: 跑行为评估（fake）
+        run: python -m evals.runner --mode fake
+
   frontend:
     name: 前端构建（Node 20）
     runs-on: ubuntu-latest

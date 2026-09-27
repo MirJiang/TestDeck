@@ -235,8 +235,9 @@ async def test_channel(cid: str, db: Session = Depends(get_db), admin: User = De
     if not c:
         raise HTTPException(404, "通知渠道不存在")
     try:
-        r = await httpx.AsyncClient(timeout=10).post(
-            c.url, json={"msgtype": "text", "text": {"content": "[TestDeck] 这是一条测试通知，配置成功 ✓"}})
+        async with httpx.AsyncClient(timeout=10) as hc:   # async with 确保连接释放
+            r = await hc.post(
+                c.url, json={"msgtype": "text", "text": {"content": "[TestDeck] 这是一条测试通知，配置成功 ✓"}})
         return {"ok": r.status_code == 200, "status": r.status_code}
     except Exception as e:
         return {"ok": False, "status": str(e)[:100]}

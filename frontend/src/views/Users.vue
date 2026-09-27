@@ -8,7 +8,7 @@ const newUser = ref({ username: '', password: '', role: 'member' })
 const err = ref('')
 const me = getUser()
 
-async function load() { users.value = await api('/auth/users') }
+async function load() { try { users.value = await api('/auth/users') } catch (e) { err.value = e.message } }
 onMounted(load)
 
 async function create() {

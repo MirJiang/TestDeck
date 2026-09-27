@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { api } from '../api'
 import CaseEditor from '../components/CaseEditor.vue'
 import RunDrawer from '../components/RunDrawer.vue'
@@ -27,6 +27,7 @@ function onImpFile(e) {
   const r = new FileReader()
   r.onload = () => { impForm.value.text = r.result; if (!impForm.value.name) impForm.value.name = f.name.replace(/\.[^.]+$/, '') }
   r.readAsText(f)
+  e.target.value = ''   // 重置：否则选同一个文件第二次不触发 change
 }
 
 async function doImport() {
@@ -69,25 +70,34 @@ function onNlDone(steps) {
   if (base && start.startsWith(base)) start = start.slice(base.length) || '/'   // 起始页面只存路径
   editing.value = { id: '', project_id: pid.value, name: r.goal.slice(0, 24), type: 'ai', target: 'ui',
     goal: r.goal, start_url: start, engine: '', max_steps: 200,
-    fixedSteps: steps, username: r.username, password: r.password, source: 'ai' }
+    fixedSteps: steps, testPoints: [], username: r.username, password: r.password, source: 'ai' }
   nlRec.value = null
   toast('AI 现场执行完成，已带出用例——确认无误后点「保存用例」', 4000)
 }
 
 onMounted(async () => {
-  projects.value = await api('/projects')
-  if (projects.value.length) { pid.value = projects.value[0].id; await load() }
+  try {
+    projects.value = await api('/projects')
+    if (projects.value.length) { pid.value = projects.value[0].id; await load() }
+  } catch (e) { toast('加载失败：' + e.message) }
 })
 
+let loadSeq = 0
 async function load() {
   if (!pid.value) return
-  list.value = await api(`/projects/${pid.value}/cases`)
-  envs.value = await api(`/projects/${pid.value}/envs`)
+  const seq = ++loadSeq
+  const p = pid.value
+  try {
+    const [cs, en] = await Promise.all([api(`/projects/${p}/cases`), api(`/projects/${p}/envs`)])
+    if (seq !== loadSeq) return   // 快速切换项目时丢弃慢返回的旧数据
+    list.value = cs; envs.value = en
+  } catch (e) { toast('加载失败：' + e.message) }
 }
 
 function openNew() {
   editing.value = { id: '', project_id: pid.value, name: '', type: 'ai', target: 'ui',
-    goal: '', start_url: '', engine: '', max_steps: 200, fixedSteps: [], username: '', password: '' }
+    goal: '', start_url: '', engine: '', max_steps: 200, fixedSteps: [], testPoints: [],
+    username: '', password: '' }
 }
 async function openEdit(id) {
   const c = await api('/cases/' + id)
@@ -97,6 +107,7 @@ async function openEdit(id) {
     target: cfg.target || 'ui', goal: cfg.goal || '', start_url: cfg.start_url || '',
     engine: cfg.engine || '', max_steps: cfg.max_steps || 30,
     endpoints: cfg.endpoints || [], fixedSteps: cfg.fixed_steps || [],
+    testPoints: cfg.test_points || [],
     username: c.username || '', password: c.password || '' }
 }
 
@@ -105,7 +116,7 @@ async function save(c) {
   const body = { project_id: c.project_id, name: c.name, type: 'ai', target: c.target || 'ui',
     goal: c.goal || '', start_url: c.start_url || '', engine: c.engine || '',
     max_steps: c.max_steps || 20, endpoints: c.endpoints || [],
-    fixed_steps: c.fixedSteps || [], source: c.source,
+    fixed_steps: c.fixedSteps || [], test_points: c.testPoints || [], source: c.source,
     username: c.username || '', password: c.password || '' }
   try {
     if (c.id) await api('/cases/' + c.id, { method: 'PUT', body })
@@ -127,7 +138,7 @@ async function del(c) {
 
 function runCase(c) { running.value = { title: c.name, caseId: c.id, caseType: c.type } }
 
-const filtered = () => list.value.filter(c => c.name.includes(q.value.trim()))
+const filtered = computed(() => list.value.filter(c => (c.name || '').includes(q.value.trim())))
 </script>
 
 <template>
@@ -143,12 +154,12 @@ const filtered = () => list.value.filter(c => c.name.includes(q.value.trim()))
         <select v-model="pid" @change="load"><option v-if="!projects.length" value="" disabled>暂无项目，请先创建</option><option v-for="p in projects" :key="p.id" :value="p.id">{{ p.name }}</option></select>
         <input v-model="q" placeholder="筛选用例名…" style="width:180px">
       </div>
-      <span class="muted">{{ filtered().length }} 条</span>
+      <span class="muted">{{ filtered.length }} 条</span>
     </div>
     <table>
       <thead><tr><th>用例</th><th>类型</th><th>步骤</th><th>来源</th><th>更新</th><th></th></tr></thead>
       <tbody>
-        <tr v-for="c in filtered()" :key="c.id">
+        <tr v-for="c in filtered" :key="c.id">
           <td><b>{{ c.name }}</b></td>
           <td><template v-if="c.type === 'ai'">
                 <span class="tag-ai">AI</span>
@@ -161,7 +172,7 @@ const filtered = () => list.value.filter(c => c.name.includes(q.value.trim()))
               </template></td>
           <td class="mono">{{ c.type === 'ai' ? (c.fixed ? '固定' : 'AI') : c.steps }}</td>
           <td class="muted">{{ c.source === 'manual' ? '手动创建' : c.source === 'ai' ? 'AI 生成' : 'Git 分析' }}</td>
-          <td class="mono muted">{{ c.updated_at.slice(0, 10) }}</td>
+          <td class="mono muted">{{ (c.updated_at || '').slice(0, 10) }}</td>
           <td style="text-align:right">
             <a v-if="c.type === 'ai'" @click="openEdit(c.id)">编辑</a><span v-else class="faint">历史</span> ·
             <a @click="runCase(c)">执行</a> ·

@@ -15,18 +15,26 @@ const note = ref('')
 
 const SOURCE_LABEL = { scan: '扫描', code: '源码', manual: '人工' }
 
+let loadSeq = 0
+
 watch(pid, async v => {
   users.value = []; mapList.value = []; note.value = ''; selId.value = ''
   form.value = { userIds: [], maxPages: 25 }
   if (v) {
+    const seq = ++loadSeq
     users.value = await api(`/projects/${v}/users`).catch(() => [])
+    if (seq !== loadSeq) return   // 已切到别的项目，丢弃慢返回
     await load()
   }
 })
 
 async function load() {
-  const r = await api(`/projects/${pid.value}/app-map`)
-  mapList.value = r.pages; mapMenus.value = r.menus || []
+  try {
+    const seq = ++loadSeq
+    const r = await api(`/projects/${pid.value}/app-map`)
+    if (seq !== loadSeq) return   // 快速切换项目时丢弃慢返回的旧地图
+    mapList.value = r.pages; mapMenus.value = r.menus || []
+  } catch (e) { toast('加载失败：' + e.message) }
 }
 
 async function doScan() {

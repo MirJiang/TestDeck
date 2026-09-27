@@ -80,7 +80,7 @@ async function copyMcpFull() {
     toast('复制失败，请手动选择文本复制')
   }
 }
-loadMcp()
+loadMcp().catch(() => { /* MCP 配置拉取失败不阻塞页面，复制入口点击时报错即可 */ })
 
 onMounted(load)
 

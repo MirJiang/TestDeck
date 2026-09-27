@@ -55,23 +55,28 @@ const __topEl = el => {
   const t = document.elementFromPoint(cx, cy);
   return !t || t === el || el.contains(t) || t.contains(el);
 };
+const __escAttr = v => String(v).replace(/[\\"]/g, '\\$&');   // 属性值转义引号/反斜杠——直接删除会改变被匹配的值
+const __attrSel = (tag, name, v, cap) => {
+  v = String(v);
+  return tag + '[' + name + (v.length > cap ? '*="' : '="') + __escAttr(v.slice(0, cap)) + '"]';
+};   // 超长截断时退化为包含匹配：等值选择器匹配不到被截断的值，必落空
 const __sel = el => {
   const tag = el.tagName.toLowerCase();
   if (el.id) return '#' + CSS.escape(el.id);
   for (const a of ['data-testid', 'data-test', 'name']) {
     const v = el.getAttribute(a);
-    if (v) return tag + '[' + a + '="' + String(v).slice(0, 40).replace(/"/g, '') + '"]';
+    if (v) return __attrSel(tag, a, v, 40);
   }
   if (tag === 'input' && el.placeholder)
-    return tag + '[placeholder="' + el.placeholder.slice(0, 30).replace(/"/g, '') + '"]';
+    return __attrSel(tag, 'placeholder', el.placeholder, 30);
   if (tag === 'input' && el.type && el.type !== 'text')
     return tag + '[type="' + el.type + '"]';
   const aria = el.getAttribute('aria-label');
   if (aria && aria.length <= 30)
-    return tag + '[aria-label="' + aria.replace(/"/g, '') + '"]';
-  const text = (el.innerText || '').trim().replace(/\\s+/g, ' ');
+    return __attrSel(tag, 'aria-label', aria, 30);
+  const text = (el.innerText || '').trim().replace(/\s+/g, ' ');
   if (text && text.length <= 24)
-    return 'text="' + text.replace(/"/g, '') + '"';
+    return 'text="' + __escAttr(text) + '"';
   // 同标签序号按已渲染（有盒）的同类元素计数：屏外元素也能拿到有效 nth
   //（点击/填写时浏览器自动滚过去）；display:none 无盒自动排除
   const peers = [...document.querySelectorAll(tag)].filter(e => e.getClientRects().length > 0);

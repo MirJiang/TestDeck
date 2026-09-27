@@ -8,6 +8,9 @@ from ..perms import check_project_access, accessible_project_ids
 
 router = APIRouter(prefix="/api/v1/flows", tags=["flows"])
 
+# update_flow 允许覆盖的字段：project_id 不在其中（校验基于原项目，放行改写等于可把流程搬进无权项目）
+_FLOW_FIELDS = ("name", "desc", "roles", "steps")
+
 
 class FlowIn(BaseModel):
     project_id: str
@@ -57,8 +60,9 @@ def update_flow(fid: str, body: FlowIn, db: Session = Depends(get_db), user: Use
     if not f:
         raise HTTPException(404, "流程不存在")
     check_project_access(f.project_id, user, db)
-    for k, v in body.model_dump().items():
-        setattr(f, k, v)
+    data = body.model_dump()
+    for k in _FLOW_FIELDS:   # 白名单覆盖，project_id 等不可经接口改写
+        setattr(f, k, data[k])
     db.commit()
     return {"ok": True}
 
@@ -85,7 +89,7 @@ async def run_flow_api(fid: str, body: RunIn, db: Session = Depends(get_db), use
         raise HTTPException(404, "流程不存在")
     check_project_access(f.project_id, user, db)
     env = db.get(Env, body.env_id)
-    if not env:
+    if not env or env.project_id != f.project_id:   # 环境必须属于该流程的项目，防跨项目引用
         raise HTTPException(400, "环境不存在")
     run = await _exec_flow_sync(f, env, f"user:{user.username}")
     return _out(run)
@@ -142,6 +146,8 @@ def flow_run_detail(rid: str, db: Session = Depends(get_db), user: User = Depend
     if not r.flow_id:
         raise HTTPException(404, "非流程执行记录")
     f = db.get(Flow, r.flow_id)
+    if not f:
+        raise HTTPException(404, "流程已删除，无法查看该执行记录")
     check_project_access(f.project_id, user, db)
     return _out(r)
 

@@ -29,7 +29,15 @@ def make_engine(url: str):
             from sqlalchemy.pool import StaticPool
             kwargs["poolclass"] = StaticPool
             kwargs["connect_args"] = {"check_same_thread": False}
-        return create_engine(url, **kwargs)
+            return create_engine(url, **kwargs)
+        eng = create_engine(url, **kwargs)
+        # WAL：读写不互斥，多 worker 高频写 detail 时显著减少锁等待（网络盘上部署除外）
+        from sqlalchemy import event
+
+        @event.listens_for(eng, "connect")
+        def _sqlite_wal(dbapi_conn, _rec):
+            dbapi_conn.execute("pragma journal_mode=WAL")
+        return eng
     return create_engine(url, pool_pre_ping=True)  # MySQL/PG 长连接断线自愈
 
 

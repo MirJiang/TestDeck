@@ -110,7 +110,8 @@ def test_expect_text_and_screenshot():
     sess = get_session(sess_id, "u1")
     r = sess.post(sess.do_action, "expect_text", {"value": "Q001"}).result(timeout=5)
     assert r["ok"] and "包含" in r["reason"]
-    r2 = sess.post(sess.do_action, "expect_text", {"value": "不存在的字"}).result(timeout=5)
+    # expect_text 判失败前有 5s 等待窗口（与 ui_runner 语义对齐），result 超时要留足余量
+    r2 = sess.post(sess.do_action, "expect_text", {"value": "不存在的字"}).result(timeout=15)
     assert not r2["ok"]
     shot = sess.post(sess.do_screenshot).result(timeout=5)
     assert shot["url"].startswith("/static/")

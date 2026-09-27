@@ -20,6 +20,19 @@ class ImportIn(BaseModel):
     url: str = ""          # 平台从该地址拉取文档（如 http://host/v3/api-docs）
 
 
+# 云厂商元数据端点：拉文档是 member 级权限即可发起的服务端请求，这类地址绝不该被探测。
+# 内网业务地址放行——本平台就是给内网被测系统用的。
+_METADATA_HOSTS = {"metadata.google.internal", "metadata.goog",
+                   "169.254.169.254", "fd00:ec2::254"}
+
+
+def _assert_fetchable(url: str):
+    from urllib.parse import urlparse
+    h = (urlparse(url).hostname or "").strip("[]").lower()
+    if h in _METADATA_HOSTS:
+        raise HTTPException(400, "不允许访问该地址")
+
+
 @router.post("/import")
 def import_doc(pid: str, body: ImportIn, db: Session = Depends(get_db), user: User = Depends(current_user)):
     check_project_access(pid, user, db)
@@ -28,10 +41,12 @@ def import_doc(pid: str, body: ImportIn, db: Session = Depends(get_db), user: Us
     if url:
         if not url.startswith(("http://", "https://")):
             raise HTTPException(400, "URL 需以 http(s):// 开头")
+        _assert_fetchable(url)
         try:
             r = httpx.get(url, timeout=20, trust_env=False, follow_redirects=True)
         except Exception as e:
             raise HTTPException(400, f"拉取失败：{type(e).__name__}: {e}"[:200])
+        _assert_fetchable(str(getattr(r, "url", "") or url))   # 重定向后的最终地址同样过一遍
         if r.status_code != 200:
             raise HTTPException(400, f"拉取失败：HTTP {r.status_code}")
         content = r.text
@@ -95,7 +110,9 @@ def refresh_doc(pid: str, did: str, db: Session = Depends(get_db), user: User = 
         raise HTTPException(400, "该文档非 URL 导入，无法刷新")
     url = doc.spec["source_url"]
     try:
+        _assert_fetchable(url)
         r = httpx.get(url, timeout=20, trust_env=False, follow_redirects=True)
+        _assert_fetchable(str(r.url))
         if r.status_code != 200:
             raise HTTPException(400, f"拉取失败：HTTP {r.status_code}")
         parsed = parse_spec(r.text)

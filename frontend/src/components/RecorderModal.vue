@@ -63,8 +63,10 @@ async function start(mode) {
   const u = url.value.trim()
   if (!u.startsWith('http')) { errMsg.value = '请先填完整地址（http://…）'; return }
   errMsg.value = ''
-  const r = await api('/cases/ui-record/start?url=' + encodeURIComponent(u) + '&mode=' + mode, { method: 'POST' })
-  sess.value = r.session
+  try {
+    const r = await api('/cases/ui-record/start?url=' + encodeURIComponent(u) + '&mode=' + mode, { method: 'POST' })
+    sess.value = r.session
+  } catch (e) { errMsg.value = '开始录制失败：' + e.message; return }
   liveSteps.value = []
   stepN.value = 0
   if (mode === 'local') {
@@ -126,6 +128,7 @@ async function checkDone() {
       aiRunning.value = true
     } else if (aiRunning.value) {
       aiRunning.value = false
+      steerSent.value = ''
       if (ai.state === 'passed') { aiGoals.push(ai.goal); aiGoal.value = '' }
       else errMsg.value = ai.state === 'cancelled'
         ? '已停止 AI 代劳，画面停留在它操作到的地方，可继续手动录制'
@@ -146,6 +149,7 @@ function onImgClick(e) {
   if (busy.value || !frameUrl.value) return
   const img = e.currentTarget
   const r = img.getBoundingClientRect()
+  if (!img.naturalWidth || !img.naturalHeight || !r.width) return   // 帧刚更新、尺寸未就绪：坐标会是 NaN
   const x = Math.round((e.clientX - r.left) * (img.naturalWidth / r.width))
   const y = Math.round((e.clientY - r.top) * (img.naturalHeight / r.height))
   errMsg.value = ''
@@ -184,6 +188,19 @@ async function doAi() {
 
 async function cancelAi() {
   try { await api(`/cases/ui-record/${sess.value}/cancel-ai`, { method: 'POST' }) } catch { /* 会话可能已结束 */ }
+}
+
+// ---- 运行中插话（steer）：不打断 AI，指示在下一个动作的工具结果里注入 ----
+const steerText = ref('')
+const steerSent = ref('')
+async function steerAi() {
+  const t = steerText.value.trim()
+  if (!t || !aiRunning.value) return
+  try {
+    const r = await api(`/cases/ui-record/${sess.value}/steer-ai`, { method: 'POST', body: { text: t } })
+    if (r.ok) { steerSent.value = t; steerText.value = '' }
+    else errMsg.value = r.error
+  } catch (e) { errMsg.value = e.message }
 }
 
 // ---- 完成 → review ----
@@ -359,9 +376,17 @@ onBeforeUnmount(() => {
           在画面上点击即记录一步；点到输入框后可在这里输入内容。滚轮可翻页（不记录为步骤）；
           登录、验证码这类麻烦事交给 AI 代劳，它做的每一步也会被记下来。
         </div>
+        <div v-if="aiRunning" class="rec-tools" style="margin-top:8px">
+          <span class="muted" style="font-size:12.5px;white-space:nowrap">插话</span>
+          <input v-model="steerText" style="flex:1;min-width:240px"
+            placeholder="不打断 AI，下一个动作前注入，如：用户名改成 test01 / 这一步跳过，去点提交"
+            @keyup.enter="steerAi">
+          <button class="btn sm" :disabled="!steerText.trim()" @click="steerAi">发送插话</button>
+        </div>
         <div v-if="aiRunning" class="muted" style="font-size:12.5px;margin-top:6px">
           <span class="spin" style="border-color:#c8cdd6;border-top-color:var(--acc)"></span>
           AI 正在页面上操作（可多轮决策，请稍候），画面会逐步刷新…
+          <template v-if="steerSent">已注入「{{ steerSent }}」，AI 将在下一个动作前看到</template>
         </div>
         <div v-if="errMsg" style="color:var(--err);font-size:12.5px;margin-top:8px">{{ errMsg }}</div>
       </template>

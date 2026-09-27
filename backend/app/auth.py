@@ -1,5 +1,6 @@
 import time
 import hashlib
+import hmac
 import bcrypt
 from jose import jwt, JWTError
 from fastapi import Depends, HTTPException, Response
@@ -81,7 +82,8 @@ def hash_pw(pw: str) -> str:
 def verify_pw(pw: str, hashed: str) -> bool:
     if hashed.startswith("$2"):
         return bcrypt.checkpw(pw.encode()[:72], hashed.encode())
-    return hashed == hashlib.sha256(("td$" + pw).encode()).hexdigest()  # 兼容旧数据
+    # 兼容旧数据（无盐 SHA-256 过渡期遗留）：常数时间比较
+    return hmac.compare_digest(hashed, hashlib.sha256(("td$" + pw).encode()).hexdigest())
 
 
 def login_throttled(username: str) -> bool:
@@ -89,7 +91,17 @@ def login_throttled(username: str) -> bool:
     now = _time.time()
     recent = [t for t in _login_attempts.get(username, []) if now - t < 60]
     _login_attempts[username] = recent
+    _prune_login_attempts(now)
     return len(recent) >= 5
+
+
+def _prune_login_attempts(now: float) -> None:
+    """清理过期的失败记录：被尝试过的任意用户名都会留下 key，不清则字典无限增长。"""
+    if len(_login_attempts) < 1000:
+        return
+    stale = [k for k, ts in _login_attempts.items() if all(now - t >= 60 for t in ts)]
+    for k in stale:
+        _login_attempts.pop(k, None)
 
 
 def record_login_fail(username: str) -> None:
@@ -119,7 +131,7 @@ def resolve_token(token: str, db) -> User | None:
         return None
     try:
         payload = jwt.decode(token, _secret(), algorithms=["HS256"])
-        if payload.get("epoch", 0) != _token_version():
+        if payload.get("epoch", 0) != _token_version() or not payload.get("sub"):
             return None
     except JWTError:
         return None
@@ -136,7 +148,11 @@ def current_user(cred: HTTPAuthorizationCredentials = Depends(bearer), db: Sessi
             raise HTTPException(401, "登录已失效，请重新登录")
     except JWTError:
         raise HTTPException(401, "登录已失效")
-    user = db.get(User, payload["sub"])
+    # MCP 专用长时效令牌只在 /mcp 服务里有效（mcp_server 用 resolve_token 自行解析），
+    # 不得当普通登录令牌调 REST 接口——10 年有效期一旦泄露面就太大了
+    if payload.get("scope") == "mcp":
+        raise HTTPException(401, "该令牌仅限 MCP 接入使用")
+    user = db.get(User, payload.get("sub"))
     if not user:
         raise HTTPException(401, "用户不存在")
     # 滑动续期：剩余有效期不足一半时换发新令牌，活跃用户无感续命（前端 api.js 拦截

@@ -123,13 +123,16 @@ def _logged_in(page) -> bool:
 
 # 执行比对（map_gaps）：在 DOM 里找一组按钮文本，返回缺失清单。
 # 用 DOM 全文匹配而不是 ai_drive 的 state.elements——后者截断到前 40 个可见元素，会误报。
+# 按钮匹配用规范化后的整词相等（子串包含会把"新增"误匹配到"新增用户"标题上，产生假阴性）；
+# body 兜底仍用包含（提示语/文案散落在正文里，无法整词对齐）。
 _GAPS_JS = """(texts) => {
-  const label = el => String(el.innerText || el.value || el.title ||
-    el.getAttribute('aria-label') || '').trim();
+  const norm = s => String(s || '').replace(/\\s+/g, '').trim();
+  const label = el => norm(el.innerText || el.value || el.title ||
+    el.getAttribute('aria-label') || '');
   const all = [...document.querySelectorAll(
     'button, input[type=submit], input[type=button], [role=button], a')].map(label);
   const body = document.body ? document.body.innerText : '';
-  return texts.filter(t => !all.some(l => l && l.includes(t)) && !body.includes(t));
+  return texts.filter(t => !all.includes(norm(t)) && !body.includes(t));
 }"""
 
 

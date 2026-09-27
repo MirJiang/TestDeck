@@ -58,6 +58,7 @@ def _migrate():
         ("app_elements", "roles", "VARCHAR(255) DEFAULT ''"),
         ("llm_logs", "run_id", "VARCHAR(64) DEFAULT ''"),
         ("app_pages", "entry", "VARCHAR(255) DEFAULT ''"),
+        ("test_runs", "saved", "JSON"),
     ]:
         if table in insp.get_table_names():
             cols = {c["name"] for c in insp.get_columns(table)}
@@ -227,10 +228,14 @@ _static.mkdir(exist_ok=True)
 
 
 class _AuthedStaticFiles(StaticFiles):
-    """执行截图/录像可能含被测系统页面与业务数据：仅登录用户可访问。
+    """执行截图/录像可能含被测系统页面与业务数据：仅登录用户可访问，且校验项目归属。
 
     鉴权双通道：Authorization: Bearer（API/程序访问）或登录时下发的 td_token Cookie
-    （<img>/<video> 标签带不了请求头，靠浏览器自动带 Cookie）。"""
+    （<img>/<video> 标签带不了请求头，靠浏览器自动带 Cookie）。
+
+    项目级校验：文件名到归属的映射——`{run_id}*.png|webm` → 执行记录 → 用例/流程/计划
+    的项目；`base-{fid}-*.png` → 流程的项目。member 只能取自己项目的产物（与 REST 侧
+    _authorize_run 同口径），admin 放行；无法判定归属时对 member 拒绝（fail-closed）。"""
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
             from .auth import resolve_token
@@ -249,16 +254,48 @@ class _AuthedStaticFiles(StaticFiles):
                         break
             db = SessionLocal()
             try:
-                user = resolve_token(token, db) if token else None
-            except Exception:
-                user = None
+                try:
+                    user = resolve_token(token, db) if token else None
+                except Exception:
+                    user = None
+                if user is None:
+                    resp = PlainTextResponse("需要登录后访问", status_code=403)
+                    await resp(scope, receive, send)
+                    return
+                if user.role != "admin":
+                    fname = scope.get("path", "").rsplit("/", 1)[-1]
+                    if not _static_file_authorized(fname, user, db):
+                        resp = PlainTextResponse("无权访问该文件", status_code=403)
+                        await resp(scope, receive, send)
+                        return
             finally:
                 db.close()
-            if user is None:
-                resp = PlainTextResponse("需要登录后访问", status_code=403)
-                await resp(scope, receive, send)
-                return
         await super().__call__(scope, receive, send)
+
+
+def _static_file_authorized(fname: str, user, db) -> bool:
+    """截图/录像文件名 → 项目归属 → 该用户是否可访问该项目。"""
+    import re
+    from .perms import accessible_project_ids
+    from .models import TestRun, TestCase, TestPlan, Flow
+    ids = set(accessible_project_ids(user, db))
+    pid = None
+    m = re.match(r"^base-([0-9a-f]+)-.", fname)   # 视觉回归基线 → 流程的项目
+    if m:
+        f = db.get(Flow, m.group(1))
+        pid = f.project_id if f else None
+    else:
+        m = re.match(r"^(R-[0-9a-f]+)(?:[.-].*)?$", fname)   # {run_id}[-后缀].png / {run_id}.webm
+        if m:
+            r = db.get(TestRun, m.group(1))
+            if r:
+                if r.plan_id and db.get(TestPlan, r.plan_id):
+                    pid = db.get(TestPlan, r.plan_id).project_id
+                elif r.flow_id and db.get(Flow, r.flow_id):
+                    pid = db.get(Flow, r.flow_id).project_id
+                elif r.case_id and db.get(TestCase, r.case_id):
+                    pid = db.get(TestCase, r.case_id).project_id
+    return pid in ids   # 无法判定归属（含已删除的记录）→ None not in ids → 拒绝
 
 
 app.mount("/static", _AuthedStaticFiles(directory=str(_static)), name="static")

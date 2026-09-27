@@ -88,19 +88,7 @@ async function run() {
     result.value = await api(path, { method: 'POST', body: {} })
     emit('done')
     if (result.value.status === 'running') {
-      curRunId = result.value.id
-      poll = setInterval(async () => {
-        try {
-          const r = await api('/runs/' + curRunId)
-          result.value = r
-          if (r.status !== 'running') {
-            clearInterval(poll); poll = null
-            curRunId = ''
-            running.value = false
-            emit('done')
-          }
-        } catch { /* 瞬时失败等下一轮 */ }
-      }, 1500)
+      startPoll(result.value.id)
     } else {
       running.value = false
     }
@@ -113,9 +101,52 @@ async function cancel() {
   try { await api(`/runs/${curRunId}/cancel`, { method: 'POST' }); } catch { /* 已结束则忽略 */ }
 }
 
+const resuming = ref(false)
+async function resumeRun() {
+  if (!result.value?.id || resuming.value) return
+  resuming.value = true
+  try {
+    const r = await api(`/runs/${result.value.id}/resume`, { method: 'POST' })
+    result.value = r          // 新的 running 记录：沿用轮询直到结束
+    err.value = ''
+    running.value = true
+    startPoll(r.id)
+  } catch (e) { err.value = e.message }
+  finally { resuming.value = false }
+}
+
+function startPoll(runId) {
+  curRunId = runId
+  const startedAt = Date.now()
+  poll = setInterval(async () => {
+    if (Date.now() - startedAt > 30 * 60 * 1000) {   // 兜底：后端异常卡 running 时轮询不无限继续
+      clearInterval(poll); poll = null; curRunId = ''
+      running.value = false
+      err.value = '执行状态长时间未更新，已停止自动刷新（可稍后在「执行记录」页查看结果）'
+      return
+    }
+    try {
+      const r = await api('/runs/' + curRunId)
+      result.value = r
+      if (r.status !== 'running') {
+        clearInterval(poll); poll = null
+        curRunId = ''
+        running.value = false
+        emit('done')
+      }
+    } catch { /* 瞬时失败等下一轮 */ }
+  }, 1500)
+}
+
 // 结果展示：单用例 detail 是步骤数组，计划 detail 是用例数组
 const steps = computed(() => result.value ? (result.value.case_id ? result.value.detail : null) : null)
 const casesOfPlan = computed(() => result.value ? (result.value.plan_id ? result.value.detail : null) : null)
+
+// 测试点汇总（带测试设计的用例）：passed/blocked/failed + 每点的断言事实
+const pointsPassed = computed(() => (result.value?.points || []).filter(p => p.status === 'passed').length)
+const pointBadge = st => st === 'passed' ? 'st ok' : (st === 'blocked' ? 'st off' : 'st err')
+const pointBadgeTxt = st => st === 'passed' ? '通过' : (st === 'blocked' ? '阻塞' : '未过')
+const assertText = p => (p.asserts || []).map(a => (a.ok ? '✓' : '✗') + a.assert).join('；')
 
 // 过程折叠：默认只展开最后的 done 结论步骤（含截图）与录像，前面的过程步骤折一行
 const folded = ref(true)
@@ -164,6 +195,9 @@ function toggleItem(i) { expandedItem.value = expandedItem.value === i ? -1 : i 
             <span class="mono muted">{{ result.duration }}s · 通过 {{ result.pass_n }} / 失败 {{ result.fail_n }}<template v-if="result.tokens != null"> · Token {{ result.tokens.toLocaleString() }}</template></span>
             <button v-if="caseType === 'ai' && result.case_id && result.status === 'passed'" class="btn sm pri"
               :disabled="solidifying" @click="solidify">{{ solidifying ? '固化中…' : '固化为普通 UI 用例' }}</button>
+            <button v-if="caseType === 'ai' && result.case_id && result.status === 'failed'" class="btn sm pri"
+              :disabled="resuming" @click="resumeRun" title="把已完成的步骤摘要与已存变量注入提示词，从断点继续而不是从零重来">
+              {{ resuming ? '续跑中…' : '断点续跑' }}</button>
             <button v-if="result.status === 'failed'" class="btn sm" :disabled="aiLoading" @click="analyze">
               {{ aiLoading ? '分析中…' : 'AI 分析失败原因' }}</button>
           </div>
@@ -172,7 +206,23 @@ function toggleItem(i) { expandedItem.value = expandedItem.value === i ? -1 : i 
         <div v-if="aiTips" style="border:1px solid var(--acc-weak);background:var(--acc-weak);border-radius:7px;padding:10px 12px;margin-bottom:10px">
           <div style="font-size:13px"><b>AI 分析</b> <span class="chip">{{ aiTips.engine === 'builtin' ? '内置规则' : aiTips.engine }}</span></div>
           <div style="font-size:12.5px;margin-top:5px">可能原因：{{ aiTips.cause }}</div>
-          <div style="font-size:12.5px;margin-top:3px">{{ aiTips.suggestion }}</div>
+          <div v-if="aiTips.suggestion" style="font-size:12.5px;margin-top:3px">{{ aiTips.suggestion }}</div>
+        </div>
+
+        <div v-if="result.points?.length" style="border:1px solid var(--line);border-radius:7px;padding:8px 12px;margin-bottom:10px">
+          <div class="row" style="margin-bottom:4px">
+            <b style="font-size:13px">测试点</b>
+            <span :class="pointsPassed === result.points.length ? 'st ok' : 'st err'"
+                  style="margin-left:6px">{{ pointsPassed }}/{{ result.points.length }} 通过</span>
+            <span class="faint" style="font-size:12px;margin-left:8px">判定来自引擎断言，非模型自评</span>
+          </div>
+          <div v-for="p in result.points" :key="p.name" class="row" style="font-size:12.5px;padding:3px 0;flex-wrap:wrap">
+            <span :class="pointBadge(p.status)" style="margin-right:6px">{{ pointBadgeTxt(p.status) }}</span>
+            <b>{{ p.name }}</b>
+            <span class="muted" style="flex:1;min-width:200px" :title="(p.asserts || []).map(a => (a.ok ? '✓ ' : '✗ ') + a.assert + (a.reason ? `（${a.reason}）` : '')).join('\n')">
+              {{ p.note || assertText(p) || '—' }}</span>
+            <span v-if="p.attempts > 1" class="faint mono">验证×{{ p.attempts }}</span>
+          </div>
         </div>
 
         <template v-if="steps">

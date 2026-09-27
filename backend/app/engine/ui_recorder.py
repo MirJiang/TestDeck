@@ -26,11 +26,13 @@ MAX_ACTIVE = 5           # 同时进行的录制会话上限
 _INIT_JS = """
 (() => {
   const send = (type, data) => console.log('__TD__' + JSON.stringify({type, ...data}));
+  // 属性值转义引号/反斜杠：否则含 " 的 name 会产出非法选择器，回放 page.click 直接抛异常
+  const escAttr = v => String(v).replace(/[\\\\"]/g, '\\\\$&');
   window.addEventListener('click', e => {
     const t = e.target;
     if (!t || !t.getBoundingClientRect) return;
     let sel = t.id ? '#' + t.id
-      : (t.name ? `${t.tagName.toLowerCase()}[name="${t.name}"]` : '')
+      : (t.name ? t.tagName.toLowerCase() + '[name="' + escAttr(t.name) + '"]' : '')
     send('click', {sel, tag: t.tagName.toLowerCase(), text: (t.innerText || t.value || '').slice(0, 20)});
   }, true);
   window.addEventListener('change', e => {
@@ -38,7 +40,7 @@ _INIT_JS = """
     if (!t) return;
     if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA') {
       const sel = t.id ? '#' + t.id
-        : (t.name ? `${t.tagName.toLowerCase()}[name="${t.name}"]` : '');
+        : (t.name ? t.tagName.toLowerCase() + '[name="' + escAttr(t.name) + '"]' : '');
       if (sel) send('fill', {sel, value: t.value.slice(0, 100)});
     }
   }, true);
@@ -50,15 +52,16 @@ _ELEM_JS = """([x, y]) => {
   const t = document.elementFromPoint(x, y);
   if (!t) return null;
   const tag = t.tagName.toLowerCase();
+  const escAttr = v => String(v).replace(/[\\\\"]/g, '\\\\$&');
   const sel = t.id ? '#' + t.id
-    : (t.name ? tag + '[name="' + t.name + '"]' : '');
+    : (t.name ? tag + '[name="' + escAttr(t.name) + '"]' : '');
   return { sel, tag, text: (t.innerText || t.value || '').slice(0, 20),
            input: tag === 'input' || tag === 'textarea',
            blank: tag === 'body' || tag === 'html' };
 }"""
 
 
-def start_recording(session_id: str, start_url: str, mode: str = "remote") -> None:
+def start_recording(session_id: str, start_url: str, mode: str = "remote", owner_id: str = "") -> None:
     _cleanup_stale()
     with _lock:
         active = sum(1 for v in _sessions.values() if not v["done"])
@@ -67,6 +70,7 @@ def start_recording(session_id: str, start_url: str, mode: str = "remote") -> No
         _sessions[session_id] = {
             "events": [], "start_url": start_url, "done": False, "error": "",
             "mode": "remote" if mode != "local" else "local",
+            "owner": owner_id,   # 会话属主：frame/cmd/stream 等接口只放行属主与 admin
             "created": time.time(), "last_active": time.time(),
             "cmd_q": queue.Queue(), "ret_q": queue.Queue(),
             "frame": b"", "page_url": start_url,
@@ -74,6 +78,20 @@ def start_recording(session_id: str, start_url: str, mode: str = "remote") -> No
         }
     target = _record_local if mode == "local" else _record_remote
     threading.Thread(target=target, args=(session_id, start_url), daemon=True).start()
+
+
+def session_owned_by(session_id: str, user) -> bool:
+    """录制会话归属校验：会话存在且（属主本人或 admin）。"""
+    with _lock:
+        sess = _sessions.get(session_id)
+        if sess is None:
+            return False
+    return user.role == "admin" or sess.get("owner") == user.id
+
+
+def session_exists(session_id: str) -> bool:
+    with _lock:
+        return session_id in _sessions
 
 
 def _cleanup_stale():
@@ -286,6 +304,19 @@ def cancel_ai(session_id: str) -> dict:
     return {"ok": True}
 
 
+def steer_ai(session_id: str, text: str) -> dict:
+    """向正在执行的 AI 代劳插话（steer）：不打断当前动作，下一次工具结果里注入改道指示。"""
+    with _lock:
+        sess = _sessions.get(session_id)
+        ai = sess.get("ai") if sess else None
+        run_id = ai.get("run_id") if ai and ai.get("state") == "running" else None
+    if not run_id:
+        return {"ok": False, "error": "AI 当前没有在执行"}
+    from .brain_agentscope import steer
+    n = steer(run_id, text)
+    return {"ok": True, "queued": n}
+
+
 def get_frame(session_id: str) -> bytes | None:
     with _lock:
         sess = _sessions.get(session_id)
@@ -376,7 +407,11 @@ def _record_local(session_id: str, start_url: str):
 def _selector(tag: str, sel: str, text: str) -> str:
     if sel:
         return sel
-    return f"{tag}:has-text(\"{text}\")" if text else tag
+    if text:
+        # 文本里的引号/反斜杠转义：不转义会产出非法的 :has-text("...") 选择器，回放必抛异常
+        esc = text.replace("\\", "\\\\").replace('"', '\\"')
+        return f'{tag}:has-text("{esc}")'
+    return tag
 
 
 def compile_steps(session_id: str) -> dict:
